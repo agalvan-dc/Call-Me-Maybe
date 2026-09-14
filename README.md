@@ -2,7 +2,7 @@
 *This project has been created as part of the 42 curriculum by agalvan-.*
 
 <div align="center">
-  <h1>Call-Me-Maybe</h1>
+  <h1>Call Me Maybe</h1>
   <p><em>Constrained Function Calling Engine for Small Language Models</em></p>
 </div>
 
@@ -103,26 +103,26 @@ graph TD
     classDef container fill:#eff6ff,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
     classDef tool fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f;
 
-    subgraph Host System [Local Host System]
-        HostDIR[Project Directory]:::host
-        HostCache[~/.cache/huggingface]:::host
-        Makefile[Makefile]:::tool
+    subgraph HostSystem["Local Host System"]
+        HostDIR["Project Directory"]:::host
+        HostCache["~/.cache/huggingface"]:::host
+        Makefile["Makefile"]:::tool
     end
 
-    subgraph Docker Container [Docker: call-me-maybe-dev]
-        Python[Python 3.12 Slim]:::container
-        UV[uv 0.5.11]:::container
-        AppUser[appuser UID 1000]:::container
-        AppDIR[/app]:::container
-        ContainerCache[/root/.cache/huggingface]:::container
+    subgraph DockerContainer["Docker: call-me-maybe-dev"]
+        Python["Python 3.12 Slim"]:::container
+        UV["uv 0.5.11"]:::container
+        AppUser["appuser UID 1000"]:::container
+        AppDIR["/app"]:::container
+        ContainerCache["/root/.cache/huggingface"]:::container
     end
 
-    HostDIR <==>|Mounted Volume -v| AppDIR
-    HostCache <==>|Mounted Volume -v| ContainerCache
-    Makefile -->|make run| UV
-    UV -->|uv run| Python
+    HostDIR <-->|"Mounted Volume (-v)"| AppDIR
+    HostCache <-->|"Mounted Volume (-v)"| ContainerCache
+    Makefile -->|"make run"| UV
+    UV -->|"uv run"| Python
 
-    linkStyle default stroke:#6b7280,stroke-width:2px,color:#374151;
+    linkStyle default stroke:#6b7280,stroke-width:2px;
 
 ```
 
@@ -253,6 +253,3 @@ uv run python -m src \
 
 Artificial Intelligence was utilized primarily as a brainstorming tool to conceptualize the regular expressions needed for the token masking logic, and to generate boilerplate structures for the Pydantic schemas. All AI suggestions were rigorously peer-reviewed, heavily modified, and thoroughly tested against the codebase to ensure complete comprehension and accountability, abiding by the school's guidelines.
 
-```
-
-```
