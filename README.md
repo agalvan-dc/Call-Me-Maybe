@@ -126,8 +126,8 @@ graph TD
 
 ```
 
-Theoretical Foundation and Working Mechanisms
-1. Bind Mounting for Code Synchronization
+### Theoretical Foundation and Working Mechanisms
+#### 1. Bind Mounting for Code Synchronization
 
     Mechanism: The workspace directory on the host ($(pwd)) is mounted directly into /app inside the container using Docker Bind Mounts (-v "$(pwd):/app:z").
 
@@ -135,7 +135,7 @@ Theoretical Foundation and Working Mechanisms
 
     SELinux Security Relabeling (:z flag): The :z option instructs Docker to automatically relabel the shared host directory content using SELinux security context rules, allowing multiple containers to access the shared files without encountering permission errors on Linux distributions like Fedora or RHEL.
 
-2. Model Weight Persistence & Cache Layering
+#### 2. Model Weight Persistence & Cache Layering
 
     Mechanism: The HuggingFace cache directory on the host system (~/.cache/huggingface) is volume-mounted to the internal container cache path (/root/.cache/huggingface).
 
@@ -143,13 +143,13 @@ Theoretical Foundation and Working Mechanisms
 
     Performance Impact: Mounting the cache directory converts disk I/O from network downloads to local host reads after the first run, dropping initialization latency from minutes to milliseconds while preventing bandwidth exhaustion and API rate-limiting.
 
-3. High-Speed Dependency Resolution (uv)
+#### 3. High-Speed Dependency Resolution (uv)
 
     Mechanism: The container integrates Astral's uv (version 0.5.11), a Rust-based Python package manager binaries fetched directly from ghcr.io/astral-sh/uv.
 
     Theoretical Rationale: Conventional package managers (pip) perform sequential dependency resolution and slower wheel extraction. uv utilizes global package caching, lockfile strictness (uv.lock), and parallel compilation (UV_COMPILE_BYTECODE=1) to deliver deterministic virtual environments inside /home/appuser/.venv.
 
-4. Security & Runtime Isolation
+#### 4. Security & Runtime Isolation
 
     Non-Root Privilege Separation: The Dockerfile creates a dedicated unprivileged user (appuser, UID 1000) and switches execution context via USER appuser. This limits kernel permissions inside the container, preventing potential host privilege escalation vulnerabilities during evaluation.
 
