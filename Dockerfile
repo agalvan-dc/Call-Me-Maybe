@@ -1,18 +1,19 @@
-FROM ghcr.io/astral-sh/uv:python:3.12-slim
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONBUFFERED=1 \
-    UV_VIRTUALENVS_CREATE=/usr/local
+    PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1
+    UV_COMPILE_BYTECODE=1 \
+    UV_PROJECT_ENVIRONMENT=/home/appuser/.venv
 
-WORKDIR	 /app
+RUN useradd -m appuser
+WORKDIR /app
 
-COPY pyproject.toml poetry.lock* uv.lock* ./
-COPY llm_sdk/pyproject.toml ./llm_sdk/
+COPY --chown=appuser:appuser . /app
 
-RUN uv sync --no-install-project --no-dev --frozen
+USER appuser
 
-COPY . /app
-
-CMD ["uv", "run", "python", "call-me-maybe.py"]
+ENV PATH="/app/.venv/bin:$PATH"
+CMD ["python", "call-me-maybe.py"]

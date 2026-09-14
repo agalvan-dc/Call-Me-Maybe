@@ -2,6 +2,7 @@
 """Main entry point for the constrained function calling engine."""
 
 import sys
+import time
 from json import JSONDecodeError
 
 from llm_sdk import Small_LLM_Model
@@ -16,6 +17,7 @@ def main() -> None:
     instance, and runs the constrained generation pipeline. Gracefully
     handles exceptions by printing error messages and exiting safely.
     """
+
     try:
         parser = Parser()
         functions, prompts, output_path = parser.parse_and_load()
@@ -31,10 +33,14 @@ def main() -> None:
             prompts=prompts,
             output_path=output_path
         )
+        start_time = time.perf_counter()
         engine.run()
     except Exception as e:
         print(f"\033[1;31mEngine Error - {e} \033[0m")
         sys.exit(1)
+
+    elapsed_time = time.perf_counter() - start_time
+    print(f"\033[1;32mExecution completed in {elapsed_time:.2f} seconds.\033[0m")
 
 
 if __name__ == "__main__":

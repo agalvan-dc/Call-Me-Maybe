@@ -1,26 +1,40 @@
 IMAGE_NAME = call-me-maybe-image
 CONTAINER_NAME = call-me-maybe-dev
 
+SHELL := /bin/bash
 OS := $(shell uname -s)
 
+HF_CACHE := $(HOME)/.cache/huggingface
+
 build:
-	@docker build -t $(IMAGE_NAME)
-	@echo -e "\e[1;32mDocker image mounted\e[0m"
+	@mkdir -p $(HF_CACHE)
+	@docker build -t $(IMAGE_NAME) .
+	@echo -e "\e[1;32mDocker image built successfully\e[0m"
 
 run:
+	@mkdir -p $(HF_CACHE)
 	@echo -e "\e[1;91mDetected OS: $(OS)\e[0m"
 	@docker run --rm -it \
 		-e PYTHONDONTWRITEBYTECODE=1 \
 		-v "$$(pwd):/app:z" \
---name $(CONTAINER_NAME) $(IMAGE_NAME) uv run call-me-maybe.py
+		-v "$(HF_CACHE):/root/.cache/huggingface:z" \
+		--name $(CONTAINER_NAME) $(IMAGE_NAME) \
+		bash -c "uv sync && uv run python -m call-me-maybe"
+
 shell:
-	docker run --rm -it -v "$$(pwd):/app:z" --name $(CONTAINER_NAME) $(IMAGE_NAME) /bin/bash
+	@mkdir -p $(HF_CACHE)
+	docker run --rm -it \
+		-v "$$(pwd):/app:z" \
+		-v "$(HF_CACHE):/root/.cache/huggingface:z" \
+		--name $(CONTAINER_NAME) $(IMAGE_NAME) /bin/bash
 
 debug:
+	@mkdir -p $(HF_CACHE)
 	docker run --rm -it \
 		-e PYTHONDONTWRITEBYTECODE=1 \
 		-v "$$(pwd):/app:z" \
-		$(IMAGE_NAME) uv run python -m pdb call-me-maybe.py 
+		-v "$(HF_CACHE):/root/.cache/huggingface:z" \
+		$(IMAGE_NAME) uv run python -m pdb -m src
 
 lint:
 	docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$$(pwd):/app:z" $(IMAGE_NAME) bash -c "uv run flake8 . && uv run mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs"
@@ -29,16 +43,16 @@ lint-strict:
 	docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$$(pwd):/app:z" $(IMAGE_NAME) bash -c "uv run flake8 . && uv run mypy . --strict"
 
 clean:
-	@echo "Cleaning cache files (resolving Docker root permissions)..."
-	@echo "Cleaning local files and JSON configurations..."
+	@echo "Cleaning cache and output files..."
 	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
-	@find . -type f -name "*.json" -delete 2>/dev/null || true
-	@rm -rf .mypy_cache poetry.lock 2>/dev/null || true
+	@rm -f data/output/*.json output/*.json 2>/dev/null || true
+	@rm -rf .mypy_cache poetry.lock .venv 2>/dev/null || true
 	@echo "Cleaning Docker environment..."
 	@docker rm -f $(CONTAINER_NAME) 2>/dev/null || true
 	@docker rmi -f $(IMAGE_NAME) 2>/dev/null || true
 	@docker image prune -f
-	@echo -e "\e[1;32mDocker and residues cleaned\e[0m"	
+	@docker builder prune -f
+	@echo -e "\e[1;32mDocker and residues cleaned\e[0m"
 
 .PHONY: build run shell debug lint lint-strict clean
