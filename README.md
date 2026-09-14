@@ -1,35 +1,36 @@
+```markdown
 *This project has been created as part of the 42 curriculum by agalvan-.*
 
 <div align="center">
-  <h1>📞 Call Me Maybe</h1>
+  <h1>Call-Me-Maybe</h1>
   <p><em>Constrained Function Calling Engine for Small Language Models</em></p>
 </div>
 
 ---
 
-## 📑 Table of Contents
-- [📖 Description](#-description)
-- [🧠 Algorithm Explanation](#-algorithm-explanation)
-- [📐 Architecture and Execution Flow](#-architecture-and-execution-flow)
-- [🎯 Design Decisions](#-design-decisions)
-- [🐳 Infrastructure and Volumes](#-infrastructure-and-volumes)
-- [⚡ Performance Analysis](#-performance-analysis)
-- [🧗 Challenges Faced](#-challenges-faced)
-- [🧪 Testing Strategy](#-testing-strategy)
-- [🚀 Instructions](#-instructions)
-- [💻 Example Usage](#-example-usage)
-- [📚 Resources](#-resources)
+## Table of Contents
+- [Description](#description)
+- [Algorithm Explanation](#algorithm-explanation)
+- [Architecture and Execution Flow](#architecture-and-execution-flow)
+- [Design Decisions](#design-decisions)
+- [Infrastructure and Volumes](#infrastructure-and-volumes)
+- [Performance Analysis](#performance-analysis)
+- [Challenges Faced](#challenges-faced)
+- [Testing Strategy](#testing-strategy)
+- [Instructions](#instructions)
+- [Example Usage](#example-usage)
+- [Resources](#resources)
 
 ---
 
-## 📖 Description
+## Description
 This project implements a constrained function calling engine designed to translate natural language prompts into structured, machine-executable JSON function calls. Large Language Models (LLMs) are powerful at understanding text, but small models (like the 0.6B parameter model used here) often struggle to produce reliable, properly formatted JSON output. 
 
 The goal of this project is to bridge that gap. By utilizing constrained decoding techniques, the system intervenes in the text generation process token-by-token. It ensures that the output is not only 100% syntactically valid JSON but also strictly adheres to predefined function schemas (correct function names, accurate argument types, and all required keys). This transforms a lightweight language model into a highly reliable structured data extractor and function dispatcher.
 
 ---
 
-## 🧠 Algorithm Explanation
+## Algorithm Explanation
 The core of this engine relies on **Constrained Decoding**. A traditional LLM generates text by predicting a probability distribution (logits) for the next token and selecting the most likely one. Relying purely on prompting for structured data is highly error-prone.
 
 Our algorithm manipulates this generation process directly:
@@ -42,7 +43,7 @@ Our algorithm manipulates this generation process directly:
 
 ---
 
-## 📐 Architecture and Execution Flow
+## Architecture and Execution Flow
 
 The following sequence diagram illustrates the lifecycle of a prompt being processed through the constrained engine.
 
@@ -50,11 +51,11 @@ The following sequence diagram illustrates the lifecycle of a prompt being proce
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#dbeafe', 'edgeColor': '#3b82f6', 'actorBkg': '#bfdbfe', 'activationBkgColor': '#eff6ff'}}}%%
 sequenceDiagram
     autonumber
-    actor User as 👤 User
-    participant CLI as 🖥️ Parser (CLI)
-    participant Engine as ⚙️ ConstrainedEngine
-    participant SDK as 🧠 Small_LLM_Model
-    participant Output as 📄 JSON File
+    actor User as User
+    participant CLI as Parser (CLI)
+    participant Engine as ConstrainedEngine
+    participant SDK as Small_LLM_Model
+    participant Output as JSON File
 
     User->>CLI: uv run python -m src
     activate CLI
@@ -83,7 +84,7 @@ sequenceDiagram
 
 ---
 
-## 🎯 Design Decisions
+## Design Decisions
 
 * **Pydantic for Validation:** I opted for Pydantic to strictly validate the input JSON schemas (`function_calling_tests.json` and `functions_definition.json`). This ensures that the engine only operates on properly formatted definitions, failing fast if the inputs are malformed.
 * **Astral's `uv` for Dependency Management:** Replaced standard `pip` with `uv` to drastically reduce environment resolution and installation times. The provided `uv.lock` ensures deterministic builds across all environments.
@@ -92,43 +93,42 @@ sequenceDiagram
 
 ---
 
-## 🐳 Infrastructure and Volumes
+## Infrastructure and Volumes
 
 This chart displays how the local host system connects seamlessly with the isolated Docker container.
 
 ```mermaid
 graph TD
-    %% Custom color definitions for clarity
     classDef host fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#064e3b;
     classDef container fill:#eff6ff,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
     classDef tool fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f;
-    classDef linkStyle stroke:#6b7280,stroke-width:2px;
 
-    subgraph Host System [💻 Local Host System]
-        HostDIR[📁 Project Directory]:::host
-        HostCache[📦 ~/.cache/huggingface]:::host
-        Makefile[🛠️ Makefile]:::tool
+    subgraph Host System [Local Host System]
+        HostDIR[Project Directory]:::host
+        HostCache[~/.cache/huggingface]:::host
+        Makefile[Makefile]:::tool
     end
 
-    subgraph Docker Container [🐳 Docker: call-me-maybe-dev]
-        Python[🐍 Python 3.12 Slim]:::container
-        UV[⚡ uv 0.5.11]:::container
-        AppUser[👤 appuser UID 1000]:::container
-        AppDIR[📂 /app]:::container
-        ContainerCache[📂 /root/.cache/huggingface]:::container
+    subgraph Docker Container [Docker: call-me-maybe-dev]
+        Python[Python 3.12 Slim]:::container
+        UV[uv 0.5.11]:::container
+        AppUser[appuser UID 1000]:::container
+        AppDIR[/app]:::container
+        ContainerCache[/root/.cache/huggingface]:::container
     end
 
-    %% Mappings and Connections
     HostDIR <==>|Mounted Volume -v| AppDIR
     HostCache <==>|Mounted Volume -v| ContainerCache
     Makefile -->|make run| UV
     UV -->|uv run| Python
 
+    linkStyle default stroke:#6b7280,stroke-width:2px,color:#374151;
+
 ```
 
 ---
 
-## ⚡ Performance Analysis
+## Performance Analysis
 
 > **Accuracy:** By using constrained decoding, the system achieves near 100% accuracy in syntax generation. As long as the model correctly identifies the semantic intent of the prompt, the resulting JSON will always be structurally flawless.
 > **Speed:** Processing speed is highly optimized. While constrained decoding adds a small computational overhead per token (due to vocabulary masking), the use of a small 0.6B parameter model keeps the overall execution well under the 5-minute threshold for the test batch.
@@ -136,7 +136,7 @@ graph TD
 
 ---
 
-## 🧗 Challenges Faced
+## Challenges Faced
 
 1. **Tokenization Quirks:** Understanding that LLM tokenizers often prepend spaces (e.g., `Ġ` or raw spaces) to words made filtering valid tokens incredibly difficult. A naive string-matching approach failed; I had to implement an advanced state tracker to handle subword tokens properly.
 2. **Logit Manipulation:** Mapping the model's token IDs back to strings in real-time without severe performance degradation required careful caching of the vocabulary file.
@@ -144,7 +144,7 @@ graph TD
 
 ---
 
-## 🧪 Testing Strategy
+## Testing Strategy
 
 * **Static Analysis:** The project relies heavily on `mypy` (with strict flags like `--disallow-untyped-defs`) and `flake8`. This catches type mismatches and syntax errors before runtime.
 * **Unit Testing Edge Cases:** Tested against missing keys, completely malformed JSON files, missing files, and prompts that intentionally try to confuse the LLM (e.g., asking for a calculation when the required function expects string manipulation).
@@ -152,7 +152,7 @@ graph TD
 
 ---
 
-## 🚀 Instructions
+## Instructions
 
 ### Prerequisites
 
@@ -204,7 +204,7 @@ make clean
 
 ---
 
-## 💻 Example Usage
+## Example Usage
 
 The program accepts arguments to override the default input and output paths.
 
@@ -243,7 +243,7 @@ uv run python -m src \
 
 ---
 
-## 📚 Resources
+## Resources
 
 * **JSON Standard:** [RFC 8259 - The JavaScript Object Notation (JSON) Data Interchange Format](https://datatracker.ietf.org/doc/html/rfc8259)
 * **Constrained Decoding Theory:** [Understanding Constrained Decoding (HuggingFace)](https://huggingface.co/blog/constrained-beam-search)
