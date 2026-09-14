@@ -2,7 +2,7 @@
 *This project has been created as part of the 42 curriculum by agalvan-.*
 
 <div align="center">
-  <h1>Call Me Maybe</h1>
+  <h1>Call-Me-Maybe</h1>
   <p><em>Constrained Function Calling Engine for Small Language Models</em></p>
 </div>
 
@@ -125,6 +125,39 @@ graph TD
     linkStyle default stroke:#6b7280,stroke-width:2px;
 
 ```
+
+Theoretical Foundation and Working Mechanisms
+1. Bind Mounting for Code Synchronization
+
+    Mechanism: The workspace directory on the host ($(pwd)) is mounted directly into /app inside the container using Docker Bind Mounts (-v "$(pwd):/app:z").
+
+    Theoretical Rationale: Unlike traditional image building where source code is copied during docker build creating static image layers, bind mounts map the host virtual filesystem inodes into the container mount namespace. This allows live source code editing on the host while execution happens inside the isolated container without needing to rebuild Docker images after every change.
+
+    SELinux Security Relabeling (:z flag): The :z option instructs Docker to automatically relabel the shared host directory content using SELinux security context rules, allowing multiple containers to access the shared files without encountering permission errors on Linux distributions like Fedora or RHEL.
+
+2. Model Weight Persistence & Cache Layering
+
+    Mechanism: The HuggingFace cache directory on the host system (~/.cache/huggingface) is volume-mounted to the internal container cache path (/root/.cache/huggingface).
+
+    Theoretical Rationale: Large Language Models (such as Qwen/Qwen3-0.6B) download multi-megabyte tensor weights, tokenizers, and configuration files upon initialization. Because containers launched with docker run --rm are ephemeral (all internal filesystem layers are destroyed on exit), failing to persist this directory would force the system to re-download the model weights over the network on every single run.
+
+    Performance Impact: Mounting the cache directory converts disk I/O from network downloads to local host reads after the first run, dropping initialization latency from minutes to milliseconds while preventing bandwidth exhaustion and API rate-limiting.
+
+3. High-Speed Dependency Resolution (uv)
+
+    Mechanism: The container integrates Astral's uv (version 0.5.11), a Rust-based Python package manager binaries fetched directly from ghcr.io/astral-sh/uv.
+
+    Theoretical Rationale: Conventional package managers (pip) perform sequential dependency resolution and slower wheel extraction. uv utilizes global package caching, lockfile strictness (uv.lock), and parallel compilation (UV_COMPILE_BYTECODE=1) to deliver deterministic virtual environments inside /home/appuser/.venv.
+
+4. Security & Runtime Isolation
+
+    Non-Root Privilege Separation: The Dockerfile creates a dedicated unprivileged user (appuser, UID 1000) and switches execution context via USER appuser. This limits kernel permissions inside the container, preventing potential host privilege escalation vulnerabilities during evaluation.
+
+    Environment Behavior Flags:
+
+        PYTHONDONTWRITEBYTECODE=1: Suppresses standard .pyc compilation file creation on the mounted host filesystem.
+
+        PYTHONUNBUFFERED=1: Forces standard output (stdout) and error (stderr) streams to flush immediately without internal buffering, guaranteeing real-time terminal output during debugging and execution.
 
 ---
 
