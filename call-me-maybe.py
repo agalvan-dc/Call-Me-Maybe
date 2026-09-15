@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Main entry point for the constrained function calling engine."""
 
 import sys
 import time
 from json import JSONDecodeError
 
-from llm_sdk import Small_LLM_Model
+from llm_sdk import Small_LLM_Model  # type: ignore
 from src import ConstrainedEngine, Parser
 
 
@@ -20,7 +19,10 @@ def main() -> None:
 
     try:
         parser = Parser()
-        functions, prompts, output_path = parser.parse_and_load()
+        parsed_data = parser.parse_and_load()
+        if parsed_data is None:
+            raise ValueError("Something went wrong in parsing....")
+        functions, prompts, output_path = parsed_data
     except (OSError, ValueError, JSONDecodeError) as e:
         print(f"\033[1;31mError - {e} \033[0m")
         sys.exit(1)
@@ -40,7 +42,8 @@ def main() -> None:
         sys.exit(1)
 
     elapsed_time = time.perf_counter() - start_time
-    print(f"\033[1;32mExecution completed in {elapsed_time:.2f} seconds.\033[0m")
+    print("\033[1;32mExecution completed in "
+          f"{elapsed_time:.2f} seconds.\033[0m")
 
 
 if __name__ == "__main__":

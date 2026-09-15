@@ -1,5 +1,3 @@
-"""Module for generating constrained JSON outputs from a small language model."""
-
 import json
 import re
 from pathlib import Path
@@ -7,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from llm_sdk import Small_LLM_Model
+from llm_sdk import Small_LLM_Model  # type: ignore
 from src.tokenizer import FunctionDef, PromptDef
 
 
@@ -29,16 +27,21 @@ class ConstrainedEngine:
         self.results: list[dict[str, Any]] = []
 
     def _build_system_prompt(self, prompt_text: str) -> str:
-        """Ultra-compressed prompt with a single master example for zero-shot precision."""
+        """Ultra-compressed prompt with a single
+            master example for zero-shot precision.
+        """
         fn_lines: list[str] = []
         for fn in self.functions:
-            props = fn.parameters.get("properties", fn.parameters) if isinstance(fn.parameters, dict) else {}
+            props = (fn.parameters.get("properties", fn.parameters)
+                     if isinstance(fn.parameters, dict) else {})
             param_names = list(props.keys())
             fn_lines.append(f"{fn.name}({', '.join(param_names)})")
 
         schema_str = " | ".join(fn_lines)
-        
-        ex = '{"name":"fn_substitute_string_with_regex","parameters":{"source_string":"a1","regex":"\\d","replacement":"X"}}'
+
+        ex = '{"name":"fn_substitute_string_with_regex"'
+        ex += ',"parameters":{"source_string":"a1"'
+        ex += ',"regex":"\\d","replacement":"X"}}'
 
         return (
             f"S:{schema_str}\n"
@@ -47,7 +50,9 @@ class ConstrainedEngine:
         )
 
     def _parse_generated_json(self, text: str) -> tuple[str, dict[str, Any]]:
-        """Parse generated text into function name and parameter dictionary."""
+        """Parse generated text into function name
+                                  and parameter dictionary.
+        """
         try:
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
@@ -61,21 +66,26 @@ class ConstrainedEngine:
             pass
         return "", {}
 
-    def _coerce_types(self, func_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _coerce_types(self, func_name: str,
+                      params: dict[str, Any]) -> dict[str, Any]:
         """Coerce parameter data types against the schema definition."""
-        target_fn = next((fn for fn in self.functions if fn.name == func_name), None)
+        target_fn = next((fn for fn in self.functions
+                          if fn.name == func_name), None)
+
         if not target_fn or not isinstance(target_fn.parameters, dict):
             return params
 
-        schema_props = target_fn.parameters.get("properties", target_fn.parameters)
+        fn_params: dict[str, Any] = target_fn.parameters
+        schema_props = fn_params.get("properties", fn_params)
         coerced: dict[str, Any] = {}
-        
+
         for key, val in params.items():
             if key not in schema_props:
                 coerced[key] = val
                 continue
 
-            expected_type = str(schema_props[key].get("type", "")).lower() if isinstance(schema_props[key], dict) else ""
+            expected_type = (str(schema_props[key].get("type", "")).lower()
+                             if isinstance(schema_props[key], dict) else "")
 
             try:
                 if expected_type in ("number", "float"):
@@ -100,12 +110,16 @@ class ConstrainedEngine:
             json.dump(self.results, f, indent=4)
 
     def run(self) -> None:
-        """High-speed loop with deferred parsing to eliminate inner-loop latency."""
+        """High-speed loop with deferred parsing
+            to eliminate inner-loop latency.
+        """
         for prompt_def in self.prompts:
             context = self._build_system_prompt(prompt_def.prompt)
             encoded: Any = self.slm.encode(context)
 
-            curr_ids: list[int] = encoded.tolist() if hasattr(encoded, "tolist") else list(encoded)
+            curr_ids: list[int] = (encoded.tolist() if
+                                   hasattr(encoded, "tolist")
+                                   else list(encoded))
             if curr_ids and isinstance(curr_ids[0], list):
                 curr_ids = curr_ids[0]
 
@@ -114,7 +128,8 @@ class ConstrainedEngine:
 
             for _ in range(38):
                 logits: Any = self.slm.get_logits_from_input_ids(curr_ids)
-                next_id = int(logits.argmax() if hasattr(logits, "argmax") else np.argmax(logits))
+                next_id = (int(logits.argmax() if hasattr(logits, "argmax")
+                               else np.argmax(logits)))
 
                 curr_ids.append(next_id)
                 new_str = str(self.slm.decode([next_id]))

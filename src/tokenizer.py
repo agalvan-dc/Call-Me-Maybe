@@ -11,9 +11,11 @@ class FunctionDef(BaseModel):
     parameters: dict[str, dict[str, str]]
     returns: dict[str, str]
 
+
 class PromptDef(BaseModel):
     """Pydantic model to validate input prompts."""
     prompt: str
+
 
 def load_and_validate_json[T: BaseModel](filepath: Path,
                                          model: type[T]) -> list[T]:
@@ -24,9 +26,9 @@ def load_and_validate_json[T: BaseModel](filepath: Path,
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
-        
+
         return [model(**item) for item in raw_data]
-    
+
     except FileNotFoundError:
         print(f"Error: File {filepath} does not exist.")
         return []

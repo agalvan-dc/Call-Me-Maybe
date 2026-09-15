@@ -5,6 +5,7 @@ SHELL := /bin/bash
 OS := $(shell uname -s)
 
 HF_CACHE := $(HOME)/.cache/huggingface
+UV_CACHE := $(HOME)/.cache/uv
 
 build:
 	@mkdir -p $(HF_CACHE)
@@ -37,10 +38,12 @@ debug:
 		$(IMAGE_NAME) uv run python -m pdb -m src
 
 lint:
-	docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$$(pwd):/app:z" $(IMAGE_NAME) bash -c "uv run flake8 . && uv run mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs"
+	@mkdir -p $(UV_CACHE)
+	docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -e UV_CACHE_DIR=/tmp/uv_cache -v "$$(pwd):/app:z" -v "$(UV_CACHE):/tmp/uv_cache:z" $(IMAGE_NAME) bash -c "uv run flake8 . --exclude=llm_sdk && uv run mypy . --exclude=llm_sdk --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs"
 
 lint-strict:
-	docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$$(pwd):/app:z" $(IMAGE_NAME) bash -c "uv run flake8 . && uv run mypy . --strict"
+	@mkdir -p $(UV_CACHE)
+	docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -e UV_CACHE_DIR=/tmp/uv_cache -v "$$(pwd):/app:z" -v "$(UV_CACHE):/tmp/uv_cache:z" $(IMAGE_NAME) bash -c "uv run flake8 . --exclude=llm_sdk && uv run mypy . --exclude=llm_sdk --strict"
 
 clean:
 	@echo "Cleaning cache and output files..."
@@ -55,4 +58,9 @@ clean:
 	@docker builder prune -f
 	@echo -e "\e[1;32mDocker and residues cleaned\e[0m"
 
-.PHONY: build run shell debug lint lint-strict clean
+fclean: clean
+	@echo "Removing downloaded model weights and uv package cache..."
+	@rm -rf $(HF_CACHE) $(UV_CACHE)
+	@echo -e "\e[1;32mAll caches (HuggingFace & uv) completely removed\e[0m"
+
+.PHONY: build run shell debug lint lint-strict clean fclean
