@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Main entry point for the constrained function calling engine."""
 
 import sys
 import time
@@ -15,8 +16,10 @@ def main() -> None:
     Parses input constraints and prompts, initializes the language model
     instance, and runs the constrained generation pipeline. Gracefully
     handles exceptions by printing error messages and exiting safely.
-    """
 
+    Raises:
+        SystemExit: Exits with code 1 if parsing, file I/O, or engine errors occur.
+    """
     try:
         parser = Parser()
         parsed_data = parser.parse_and_load()

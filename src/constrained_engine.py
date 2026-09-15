@@ -1,3 +1,5 @@
+"""Constrained execution engine for LLM function calling."""
+
 import json
 import re
 from pathlib import Path
@@ -19,7 +21,15 @@ class ConstrainedEngine:
         prompts: list[PromptDef],
         output_path: Path
     ) -> None:
-        """Initialize the ConstrainedEngine."""
+        """
+        Initialize the ConstrainedEngine.
+
+        Args:
+            slm: The initialized language model instance.
+            functions: A list of parsed function definitions.
+            prompts: A list of prompts to process.
+            output_path: The file path where the generated JSON will be saved.
+        """
         self.slm = slm
         self.functions = functions
         self.prompts = prompts
@@ -27,8 +37,16 @@ class ConstrainedEngine:
         self.results: list[dict[str, Any]] = []
 
     def _build_system_prompt(self, prompt_text: str) -> str:
-        """Ultra-compressed prompt with a single
-            master example for zero-shot precision.
+        """
+        Build an ultra-compressed system prompt.
+
+        Uses a single master example for zero-shot precision.
+
+        Args:
+            prompt_text: The user's input prompt to be processed.
+
+        Returns:
+            The fully formatted system prompt string.
         """
         fn_lines: list[str] = []
         for fn in self.functions:
@@ -50,8 +68,16 @@ class ConstrainedEngine:
         )
 
     def _parse_generated_json(self, text: str) -> tuple[str, dict[str, Any]]:
-        """Parse generated text into function name
-                                  and parameter dictionary.
+        """
+        Parse generated text into a function name and parameter dictionary.
+
+        Args:
+            text: The raw generated text from the language model.
+
+        Returns:
+            A tuple containing the function name (str) 
+                                  and its parameters (dict).
+            Returns an empty string and dictionary if parsing fails.
         """
         try:
             match = re.search(r'\{.*\}', text, re.DOTALL)
@@ -68,7 +94,16 @@ class ConstrainedEngine:
 
     def _coerce_types(self, func_name: str,
                       params: dict[str, Any]) -> dict[str, Any]:
-        """Coerce parameter data types against the schema definition."""
+        """
+        Coerce parameter data types against the schema definition.
+
+        Args:
+            func_name: The name of the function to check against the schema.
+            params: The raw dictionary of parameters extracted from the JSON.
+
+        Returns:
+            A new dictionary of parameters with properly cast data types.
+        """
         target_fn = next((fn for fn in self.functions
                           if fn.name == func_name), None)
 
@@ -104,14 +139,20 @@ class ConstrainedEngine:
         return coerced
 
     def export_json(self) -> None:
-        """Export generated function calls to the output JSON file."""
+        """
+        Export generated function calls to the output JSON file.
+        
+        Creates the necessary parent directories if they do not exist.
+        """
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.output_path, 'w', encoding='utf-8') as f:
             json.dump(self.results, f, indent=4)
 
     def run(self) -> None:
-        """High-speed loop with deferred parsing
-            to eliminate inner-loop latency.
+        """
+        Execute a high-speed generation loop.
+
+        Uses deferred parsing to eliminate inner-loop latency.
         """
         for prompt_def in self.prompts:
             context = self._build_system_prompt(prompt_def.prompt)
