@@ -1,0 +1,30 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Type checking and linters
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Generated output
+data/output/
+output/
+
+# Logs and secrets
+*.log
+.env
+
+# OS files
+.DS_Store
+
+# Subject pdf (not part of the deliverable)
+call-me-maybe.pdf

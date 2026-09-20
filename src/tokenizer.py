@@ -2,8 +2,11 @@
 
 import json
 from pathlib import Path
+from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class FunctionDef(BaseModel):
@@ -21,8 +24,8 @@ class PromptDef(BaseModel):
     prompt: str
 
 
-def load_and_validate_json[T: BaseModel](filepath: Path,
-                                         model: type[T]) -> list[T]:
+def load_and_validate_json(filepath: Path,
+                           model: type[T]) -> list[T]:
     """
     Load a JSON file and validate its content against a Pydantic model.
 

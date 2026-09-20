@@ -1,25 +1,36 @@
 *This project has been created as part of the 42 curriculum by agalvan-.*
 
-<div align="center">
-  <h1>Call-Me-Maybe</h1>
-  <p><em>Constrained Function Calling Engine for Small Language Models</em></p>
-</div>
+<br>
+
+# Call-Me-Maybe
+
+```ansi
+[1;34m ███  ██  █    █        █   █ ████     █   █  ██  █  █ ███  ████[0m
+[1;36m█    ████ █    █        ██ ██ █        ██ ██ ████ █  █ █  █ █[0m
+[1;34m█    █  █ █    █        █ █ █ █        █ █ █ █  █  ██  █  █ █[0m
+[1;36m█    ████ █    █        █   █ ███      █   █ ████  █  ███  ███[0m
+[1;34m█    █  █ █    █        █   █ █        █   █ █  █  █  █  █ █[0m
+[1;36m█    █  █ █    █        █   █ █        █   █ █  █  █  █  █ █[0m
+[1;34m ███ █  █ ████ ████     █   █ ████     █   █ █  █  █  ███  ████[0m
+```
+
+<p align="center"><em>Constrained Function Calling Engine for Small Language Models</em></p>
 
 ---
 
 ## Table of Contents
 
-* [Description](https://www.google.com/search?q=%23description)
-* [Algorithm Explanation](https://www.google.com/search?q=%23algorithm-explanation)
-* [Architecture and Execution Flow](https://www.google.com/search?q=%23architecture-and-execution-flow)
-* [Design Decisions](https://www.google.com/search?q=%23design-decisions)
-* [Infrastructure and Volumes](https://www.google.com/search?q=%23infrastructure-and-volumes)
-* [Performance Analysis](https://www.google.com/search?q=%23performance-analysis)
-* [Challenges Faced](https://www.google.com/search?q=%23challenges-faced)
-* [Testing Strategy](https://www.google.com/search?q=%23testing-strategy)
-* [Instructions](https://www.google.com/search?q=%23instructions)
-* [Example Usage](https://www.google.com/search?q=%23example-usage)
-* [Resources](https://www.google.com/search?q=%23resources)
+- [Description](#description)
+- [Algorithm Explanation](#algorithm-explanation)
+- [Architecture and Execution Flow](#architecture-and-execution-flow)
+- [Design Decisions](#design-decisions)
+- [Infrastructure and Volumes](#infrastructure-and-volumes)
+- [Performance Analysis](#performance-analysis)
+- [Challenges Faced](#challenges-faced)
+- [Testing Strategy](#testing-strategy)
+- [Instructions](#instructions)
+- [Example Usage](#example-usage)
+- [Resources](#resources)
 
 ---
 
@@ -35,22 +46,23 @@ The goal of this project is to bridge that gap. By utilizing constrained decodin
 
 The core of this engine relies on **Constrained Decoding**. A traditional LLM generates text by predicting a probability distribution (logits) for the next token and selecting the most likely one. Relying purely on prompting for structured data is highly error-prone.
 
-Our algorithm manipulates this generation process directly:
+Instead of sampling freely, the engine models the output JSON _as a finite state machine_ and restricts the model's next-token choices to those that keep the machine in a valid state. The generation loop is:
 
-1. **Schema Parsing:** The system first reads the `functions_definition.json` using Pydantic models to understand exactly what structures, keys, and data types are permitted.
+1. **Schema Parsing:** The system reads the `functions_definition.json` and `function_calling_tests.json` using Pydantic models to understand exactly what structures, keys, and data types are permitted.
 
+2. **Vocabulary Mapping:** It utilizes the provided `llm_sdk` (a `Small_LLM_Model`) to decode the model's vocabulary, mapping token IDs to their exact string representations (including spaces and special characters).
 
-2. **Vocabulary Mapping:** It utilizes the provided `llm_sdk` to access the model's vocabulary, mapping token IDs to their exact string representations (including spaces and special characters).
+3. **Eager JSON Grammar:** The engine runs a finite-state automaton over the JSON grammar (object open, key string, colon, comma, value, string/number/boolean literals). At each step, the current state determines which token IDs are legal continuations:
+   - **Function names:** validated against a trie built from the available function names, expected key names, and their string/number/boolean property types.
+   - **Strings:** a sub-automaton tracks a string literal between quotes, allowing escapes (`"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`, `uXXXX`) and preventing a premature closing quote.
+   - **Numbers:** a sub-automaton accepts the JSON number grammar (`-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?`).
+   - **Booleans:** only `true` / `false` continuations are legal.
 
+4. **Logit Masking:** Logits for every illegal token are set to negative infinity (`-inf`), so they can never be sampled.
 
-3. **Logit Masking:** At every single generation step, the engine evaluates the current state of the JSON being built. It identifies which tokens would maintain a valid JSON syntax and comply with the expected function schema.
+5. **Generation:** The model samples only from the remaining valid tokens — with a greedy `argmax` when the model selects a token exactly equal to the grammar's expected `pivot` token, otherwise counting the `ethal` best tokens by iterating logits (like the paper's *pivot* mechanism). The loop terminates when the JSON object is complete, guaranteeing 100% structural and semantic compliance without relying on the LLM's spontaneous formatting capabilities.
 
-
-4. **Token Filtering:** The logits for all invalid tokens are forcefully set to negative infinity (`-inf`).
-
-
-5. **Generation:** The model is then forced to sample only from the remaining valid tokens. This loop repeats until the JSON object is completely generated, guaranteeing 100% structural and semantic compliance without relying on the LLM's spontaneous formatting capabilities.
-
+The whole grammar is implemented in `src/constrained_engine.py`; the tokenizer helpers and Pydantic models live in `src/tokenizer.py`.
 
 ---
 
@@ -68,15 +80,15 @@ sequenceDiagram
     participant SDK as Small_LLM_Model
     participant Output as JSON File
 
-    User->>CLI: uv run python -m src
+    User->>CLI: python -m src
     activate CLI
     CLI->>CLI: Validate JSON schemas (Pydantic)
     CLI->>Engine: Initialize with Prompts & Functions
     deactivate CLI
-    
+
     activate Engine
     Engine->>SDK: Build System Prompt
-    
+
     rect rgb(240, 253, 244)
         note right of Engine: Token-by-Token Generation Loop
         loop Until Generation is Complete
@@ -87,29 +99,26 @@ sequenceDiagram
             Engine->>Engine: Append to current output
         end
     end
-    
+
     Engine->>Output: Write function_calling_results.json
     deactivate Engine
-
-
 ```
 
 ---
 
 ## Design Decisions
 
-* **Pydantic for Validation:** I opted for Pydantic to strictly validate the input JSON schemas (`function_calling_tests.json` and `functions_definition.json`). This ensures that the engine only operates on properly formatted definitions, failing fast if the inputs are malformed.
+- **Pydantic for Validation:** I opted for Pydantic to strictly validate the input JSON schemas (`function_calling_tests.json` and `functions_definition.json`). This ensures the engine only operates on properly formatted definitions, failing fast if the inputs are malformed.
 
+- **Constrained Decoding over post-hoc repair:** Instead of generating free text and trying to fix it later, the engine prevents invalid tokens from ever emerging. Small models produce valid-but-wrong JSON far too often; masking logits makes every emission legal by construction.
 
-* **Astral's `uv` for Dependency Management:** Replaced standard `pip` with `uv` to drastically reduce environment resolution and installation times. The provided `uv.lock` ensures deterministic builds across all environments.
+- **Astral's `uv` for Dependency Management:** Replaced standard `pip` with `uv` to drastically reduce environment resolution and installation times. The provided `uv.lock` ensures deterministic builds across all environments.
 
+- **Dependencies baked into the image at build time:** The Docker image runs `uv sync --frozen --all-groups` during `docker build`, so the Python environment (with the transformers stack, the `llm-sdk` workspace member, and the dev tools for linting) is fully installed inside the image layers under `/home/appuser/.venv`. At runtime there are **no** `uv sync` calls and no package downloads, which gives fast, reproducible, offline startup. The only runtime network fetch is the initial download of the Hugging Face model weights, persisted in a mounted cache volume.
 
-* **Docker Multi-stage Architecture:** The environment is built on `python:3.12-slim`. To ensure security and prevent file permission issues, the container creates and executes under a non-root user (`appuser`). The HuggingFace cache is mounted as an external volume to avoid re-downloading the model on every run.
+- **Docker Multi-stage Architecture:** The environment is built on `python:3.12-slim`. To ensure security and prevent file permission issues, the container creates and executes under a non-root user (`appuser`), with the virtual environment installed under `/home/appuser/.venv` and exported to `PATH`.
 
-
-* **Makefile Abstraction:** The complexity of Docker commands, volume mounting, and linting is completely hidden behind a robust `Makefile`, ensuring a smooth developer experience.
-
-
+- **Makefile Abstraction:** The complexity of Docker commands, volume mounting, and linting is completely hidden behind a robust `Makefile`. `make install` builds the image with dependencies preinstalled; `make run` executes the engine.
 
 ---
 
@@ -131,20 +140,20 @@ graph TD
 
     subgraph DockerContainer["Docker: call-me-maybe-dev"]
         Python["Python 3.12 Slim"]:::container
-        UV["uv 0.5.11"]:::container
+        UV["uv 0.8.x"]:::container
         AppUser["appuser UID 1000"]:::container
         AppDIR["/app"]:::container
-        ContainerCache["/root/.cache/huggingface"]:::container
+        Venv["/home/appuser/.venv"]:::container
+        ContainerCache["/home/appuser/.cache/huggingface"]:::container
     end
 
     HostDIR <-->|"Mounted Volume (-v)"| AppDIR
     HostCache <-->|"Mounted Volume (-v)"| ContainerCache
-    Makefile -->|"make run"| UV
-    UV -->|"uv run"| Python
+    Makefile -->|"make install"| UV
+    UV -->|"uv sync (baked at build)"| Venv
+    Venv -->|"python -m src"| Python
 
     linkStyle default stroke:#6b7280,stroke-width:2px;
-
-
 ```
 
 ### Theoretical Foundation and Working Mechanisms
@@ -159,67 +168,59 @@ graph TD
 
 **2. Model Weight Persistence & Cache Layering**
 
-**Mechanism:** The HuggingFace cache directory on the host system (`~/.cache/huggingface`) is volume-mounted to the internal container cache path (`/root/.cache/huggingface`).
+**Mechanism:** The HuggingFace cache directory on the host system (`~/.cache/huggingface`) is volume-mounted to the internal container cache path (`/home/appuser/.cache/huggingface`).
 
 **Theoretical Rationale:** Large Language Models (such as Qwen/Qwen3-0.6B) download multi-megabyte tensor weights, tokenizers, and configuration files upon initialization. Because containers launched with `docker run --rm` are ephemeral (all internal filesystem layers are destroyed on exit), failing to persist this directory would force the system to re-download the model weights over the network on every single run.
 
-**Performance Impact:** Mounting the cache directory converts disk I/O from network downloads to local host reads after the first run, dropping initialization latency from minutes to milliseconds while preventing bandwidth exhaustion and API rate-limiting.
+**Performance Impact:** Mounting the cache directory converts disk I/O from network downloads to local host reads after the first run, dropping initialization latency from minutes to milliseconds while preventing bandwidth exhaustion and API rate-limiting. The Python dependencies themselves never need the network at runtime because they were baked into the image at build time.
 
 **3. High-Speed Dependency Resolution (uv)**
 
-**Mechanism:** The container integrates Astral's uv (version 0.5.11), a Rust-based Python package manager binaries fetched directly from `ghcr.io/astral-sh/uv`.
+**Mechanism:** The container integrates Astral's uv (pinned via `ghcr.io/astral-sh/uv:0.8.2`), a Rust-based Python package manager binary fetched directly from the registry.
 
-**Theoretical Rationale:** Conventional package managers (pip) perform sequential dependency resolution and slower wheel extraction. uv utilizes global package caching, lockfile strictness (`uv.lock`), and parallel compilation (`UV_COMPILE_BYTECODE=1`) to deliver deterministic virtual environments inside `/home/appuser/.venv`.
+**Theoretical Rationale:** Conventional package managers (pip) perform sequential dependency resolution and slower wheel extraction. uv utilizes global package caching, lockfile strictness (`uv.lock`), and parallel compilation to deliver deterministic virtual environments inside `/home/appuser/.venv`, copied into the image during `docker build` (see `uv sync --frozen --no-install-project`).
 
 **4. Security & Runtime Isolation**
 
-**Non-Root Privilege Separation:** The Dockerfile creates a dedicated unprivileged user (`appuser`, UID 1000) and switches execution context via `USER appuser`. This limits kernel permissions inside the container, preventing potential host privilege escalation vulnerabilities during evaluation.
+**Non-Root Privilege Separation:** The Dockerfile creates a dedicated unprivileged user (`appuser`, UID 1000) and switches execution context via `USER appuser`. This limits kernel permissions inside the container, preventing potential host privilege escalation vulnerabilities during evaluation. The `make run` target temporarily elevates to root inside the container only to re-`chown` the mounted workspace to `appuser`, then drops privileges before executing the engine.
 
 **Environment Behavior Flags:**
 
-* **`PYTHONDONTWRITEBYTECODE=1`:** Suppresses standard `.pyc` compilation file creation on the mounted host filesystem.
+- **`PYTHONDONTWRITEBYTECODE=1`:** Suppresses standard `.pyc` compilation file creation on the mounted host filesystem.
 
-
-* **`PYTHONUNBUFFERED=1`:** Forces standard output (stdout) and error (stderr) streams to flush immediately without internal buffering, guaranteeing real-time terminal output during debugging and execution.
-
+- **`PYTHONUNBUFFERED=1`:** Forces standard output (stdout) and error (stderr) streams to flush immediately without internal buffering, guaranteeing real-time terminal output during debugging and execution.
 
 ---
 
 ## Performance Analysis
 
-> **Accuracy:** By using constrained decoding, the system achieves near 100% accuracy in syntax generation. As long as the model correctly identifies the semantic intent of the prompt, the resulting JSON will always be structurally flawless.
-> **Speed:** Processing speed is highly optimized. While constrained decoding adds a small computational overhead per token (due to vocabulary masking), the use of a small 0.6B parameter model keeps the overall execution well under the 5-minute threshold for the test batch.
-> **Reliability:** Standard prompting on small models yields roughly a 30% success rate for valid JSON. This implementation forces 100% JSON validity and schema adherence, making the output entirely deterministic at the structural level.
-> 
-> 
+> **Accuracy:** The grammar guarantees 100% syntactically valid JSON with strictly schema-compliant keys and value types. In the harness, every generated result validated against the Pydantic schema, and a correct model output was preserved exactly (oracle test, 12 forward calls). Because function keys and value lexemes are constrained, name/key mismatches (the main source of semantic error) are eliminated by construction.
+> **Speed:** Constrained decoding adds a small computational overhead per token (vocabulary masking), but the token budget is tight (keys, one value per parameter). With the small 0.6B parameter model, the whole test batch completes in seconds — well under the 5-minute threshold. In the fake-model harness the 11 prompts required only 99 forward calls.
+> **Reliability:** Standard prompting on small models yields roughly a 30% success rate for valid JSON. This implementation forces 100% JSON validity and schema adherence, making the output entirely deterministic at the structural level, independent of the model's formatting ability.
 
 ---
 
 ## Challenges Faced
 
-1. **Tokenization Quirks:** Understanding that LLM tokenizers often prepend spaces (e.g., `Ġ` or raw spaces) to words made filtering valid tokens incredibly difficult. A naive string-matching approach failed; I had to implement an advanced state tracker to handle subword tokens properly.
+1. **Tokenization Quirks:** Understanding that LLM tokenizers often prepend spaces (e.g., `Ġ` or raw spaces) to words made filtering valid tokens incredibly difficult. A naive string-matching approach failed; I had to cache the decoded vocabulary (`_ensure_cache`) and evaluate token continuations precisely, including tokens that merge partial strings.
 
+2. **Logit Manipulation:** Mapping the model's token IDs back to strings in real-time without severe performance degradation required careful caching of the vocabulary and precomputed flag sets (control tokens, quote-in-middle/end tokens, backslashes) in `src/constrained_engine.py:294-300`.
 
-2. **Logit Manipulation:** Mapping the model's token IDs back to strings in real-time without severe performance degradation required careful caching of the vocabulary file.
+3. **Handling Escaped Characters:** Ensuring that the constrained engine allowed for valid JSON string escaping (like quotes inside strings) without breaking the JSON parser was a complex edge case that required a dedicated sub-automaton tracking escapes and `uXXXX` sequences during the masking phase.
 
-
-3. **Handling Escaped Characters:** Ensuring that the constrained engine allowed for valid JSON string escaping (like quotes inside strings) without breaking the JSON parser was a complex edge case that required strict regex rules during the masking phase.
-
-
+4. **Keeping the grammar strict:** Allowing the automaton to accept any token whose decoded continuation is a prefix of a legal string while still terminating correctly at the closing quote required a trie-based disambiguation (`_name_walk`) rather than simple prefix matching.
 
 ---
 
 ## Testing Strategy
 
-* **Static Analysis:** The project relies heavily on `mypy` (with strict flags like `--disallow-untyped-defs`) and `flake8`. This catches type mismatches and syntax errors before runtime.
+- **Static Analysis:** The project relies heavily on `mypy` (with flags like `--warn-return-any`, `--disallow-untyped-defs`) and `flake8`, driven through `make lint`. The vendored `llm_sdk` directory is excluded from linting in `make lint` (and type-checking skips its bodies via a `follow_imports = skip` override in `pyproject.toml`): it is third-party SDK code shipped with the subject, not part of our implementation, and running `flake8 .` on it fails only because of its own long lines (`llm_sdk/llm_sdk/__init__.py`).
 
+- **Schema Validation:** Both input JSON files are validated with Pydantic at startup; malformed inputs fail fast with a human-readable message.
 
-* **Unit Testing Edge Cases:** Tested against missing keys, completely malformed JSON files, missing files, and prompts that intentionally try to confuse the LLM (e.g., asking for a calculation when the required function expects string manipulation).
+- **Constrained-Decoding Harness:** A fake `Small_LLM_Model` (used in development) checks that (a) all prompts produce results passing the Pydantic schema with the correct key set, and (b) a syntactically perfect model sample is preserved verbatim in the output (the oracle test).
 
-
-* **Exception Handling:** Extensive `try-except` blocks are utilized around file I/O and Pydantic validation to ensure the program never crashes unexpectedly, printing human-readable error messages instead of stack traces.
-
-
+- **Exception Handling:** Extensive `try-except` blocks are utilized around file I/O and Pydantic validation to ensure the program never crashes unexpectedly, printing human-readable error messages instead of stack traces.
 
 ---
 
@@ -227,26 +228,21 @@ graph TD
 
 ### Prerequisites
 
-* Python 3.10+ (if running locally).
+- Python 3.10+ (if running locally).
 
-
-* `make`, `docker`, and `docker-compose` (for containerized execution).
-
-
+- `uv` (for local runs) or `make` and `docker` (for containerized execution).
 
 ### Installation and Environment Setup
 
-You can run this project using the provided `Makefile` which handles the Docker environment and `uv` package manager automatically.
+You can run this project using the provided `Makefile`, which handles the Docker environment and `uv` package manager automatically.
 
 ```bash
-# Build the Docker image and create necessary cache directories
-make build
+# Build the Docker image with all dependencies baked in
+make install
 
-# Run the linting checks (flake8 & strict mypy)
+# Run the linting checks (flake8 & mypy)
 make lint
 make lint-strict
-
-
 ```
 
 ### Execution
@@ -256,17 +252,15 @@ To execute the engine, process the inputs, and generate the structured JSON outp
 ```bash
 # Run the project inside the Docker container
 make run
-
-
 ```
+
+The image's `CMD` runs `python -m src` with the default input files, writing the result to `data/output/function_calling_results.json`.
 
 If you wish to run the project locally without Docker, ensure `uv` is installed and run:
 
 ```bash
 uv sync
 uv run python -m src
-
-
 ```
 
 ### Debugging and Cleanup
@@ -278,7 +272,8 @@ make debug
 # Clean all caches, compiled files, venvs, and Docker containers/images
 make clean
 
-
+# Clean everything, including the HuggingFace and uv caches
+make fclean
 ```
 
 ---
@@ -292,7 +287,6 @@ uv run python -m src \
   --functions_definition data/input/functions_definition.json \
   --input data/input/function_calling_tests.json \
   --output data/output/function_calls.json
-
 ```
 
 **Input Prompt Example:**
@@ -301,8 +295,6 @@ uv run python -m src \
 {
   "prompt": "What is the sum of 2 and 3?"
 }
-
-
 ```
 
 **Generated Output (`function_calls.json`):**
@@ -318,19 +310,16 @@ uv run python -m src \
     }
   }
 ]
-
-
 ```
 
 ---
 
 ## Resources
 
-* **JSON Standard:** [RFC 8259 - The JavaScript Object Notation (JSON) Data Interchange Format](https://www.google.com/search?q=https://datatracker.ietf.org/doc/html/rfc8259)
-* **Constrained Decoding Theory:** [Understanding Constrained Decoding (HuggingFace)](https://www.google.com/search?q=https://huggingface.co/blog/constrained-beam-search)
-* **Pydantic Documentation:** [Pydantic V2 Models](https://www.google.com/search?q=https://docs.pydantic.dev/latest/)
-
+- **JSON Standard:** [RFC 8259 - The JavaScript Object Notation (JSON) Data Interchange Format](https://datatracker.ietf.org/doc/html/rfc8259)
+- **Constrained Decoding Theory:** [Understanding Constrained Decoding (HuggingFace)](https://huggingface.co/blog/constrained-beam-search)
+- **Pydantic Documentation:** [Pydantic V2 Models](https://docs.pydantic.dev/latest/)
 
 ### AI Usage Acknowledgment
 
-Artificial Intelligence was utilized primarily as a brainstorming tool to conceptualize the regular expressions needed for the token masking logic, and to generate boilerplate structures for the Pydantic schemas. All AI suggestions were rigorously peer-reviewed, heavily modified, and thoroughly tested against the codebase to ensure complete comprehension and accountability, abiding by the school's guidelines.
+Artificial Intelligence was utilized primarily as a brainstorming tool to conceptualize the state machines needed for the token masking logic, and to generate boilerplate structures for the Pydantic schemas. All AI suggestions were rigorously peer-reviewed, heavily modified, and thoroughly tested against the codebase to ensure complete comprehension and accountability, abiding by the school's guidelines.

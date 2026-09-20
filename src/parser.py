@@ -36,7 +36,7 @@ class Parser:
         Parse arguments and return the validated data ready for processing.
 
         Returns:
-            A tuple containing a list of valid function definitions, a list of 
+            A tuple containing a list of valid function definitions, a list of
             valid prompts, and the desired output path.
 
         Raises:
