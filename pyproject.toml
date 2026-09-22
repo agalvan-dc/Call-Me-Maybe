@@ -33,6 +33,8 @@ exclude = [
     ".git",
     "__pycache__",
     ".mypy_cache",
+    ".venv",
+    "llm_sdk",
 ]
 max-line-length = 80
 

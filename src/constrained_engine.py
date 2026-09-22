@@ -7,7 +7,6 @@ from typing import Any, cast
 import numpy as np
 
 from llm_sdk import Small_LLM_Model
-
 from src.tokenizer import FunctionDef, PromptDef
 
 
@@ -39,9 +38,7 @@ class ConstrainedEngine:
         self._vocab_size = 0
         self._tok_text: list[str] = []
         self._ctrl_ids: set[int] = set()
-        self._quote_mid_ids: set[int] = set()
-        self._quote_end_ids: set[int] = set()
-        self._backslash_ids: set[int] = set()
+        self._quote_ids: set[int] = set()
         self._escape_start_ids: set[int] = set()
 
     def _encode(self, text: str) -> list[int]:
@@ -68,9 +65,7 @@ class ConstrainedEngine:
             return
         self._vocab_size = vocab_size
         ctrl: set[int] = set()
-        quote_mid: set[int] = set()
-        quote_end: set[int] = set()
-        backslash: set[int] = set()
+        quote: set[int] = set()
         escape_start: set[int] = set()
         texts: list[str] = []
         for i in range(vocab_size):
@@ -78,21 +73,13 @@ class ConstrainedEngine:
             texts.append(piece)
             if any(ord(ch) < 0x20 for ch in piece):
                 ctrl.add(i)
-            qpos = piece.find('"')
-            if qpos != -1:
-                if qpos == len(piece) - 1:
-                    quote_end.add(i)
-                else:
-                    quote_mid.add(i)
-            if "\\" in piece:
-                backslash.add(i)
+            if '"' in piece:
+                quote.add(i)
             if piece and piece[0] in '"\\/bfnrtu':
                 escape_start.add(i)
         self._tok_text = texts
         self._ctrl_ids = ctrl
-        self._quote_mid_ids = quote_mid
-        self._quote_end_ids = quote_end
-        self._backslash_ids = backslash
+        self._quote_ids = quote
         self._escape_start_ids = escape_start
 
     @staticmethod
@@ -143,27 +130,39 @@ class ConstrainedEngine:
         return "invalid"
 
     @staticmethod
-    def _string_token(piece: str, escaped: bool) -> tuple[bool, bool, bool]:
+    def _string_token(
+        piece: str, escaped: bool, struct: str
+    ) -> tuple[bool, bool, bool, int]:
         """Validate a token as JSON string content.
 
-        Returns a tuple ``(ok, escaped_at_end, terminated)`` describing how the
-        token interacts with the JSON string grammar.
+        Args:
+            piece: The decoded text of a candidate token.
+            escaped: Whether a pending escape escape sequence must start.
+            struct: The exact JSON structure expected right after the string
+                value (e.g. ``",\"next_key\":"`` or ``"}}"``). Any characters
+                a closing quote leaves behind must be a prefix of this string,
+                otherwise the token cannot terminate the value.
+
+        Returns:
+            A tuple ``(ok, escaped_at_end, terminated, quote_idx)``. When the
+            token closes the string, the closing quote sits at ``quote_idx``.
         """
         for idx, ch in enumerate(piece):
             if escaped:
                 if ch in '"\\/bfnrtu':
                     escaped = False
                 else:
-                    return False, False, False
+                    return False, False, False, -1
             elif ch == "\\":
                 escaped = True
             elif ch == '"':
-                if idx == len(piece) - 1:
-                    return True, False, True
-                return False, False, False
+                tail = piece[idx + 1:]
+                if struct.startswith(tail):
+                    return True, False, True, idx
+                return False, False, False, -1
             elif ord(ch) < 0x20:
-                return False, False, False
-        return True, escaped, False
+                return False, False, False, -1
+        return True, escaped, False, -1
 
     def _gen_name(self, input_ids: list[int]) -> tuple[str, list[int]]:
         """Generate a function name constrained to the known function list."""
@@ -175,18 +174,25 @@ class ConstrainedEngine:
             alive = [t for t in targets if t.startswith(name)]
             if not alive:
                 break
+            if len(alive) == 1 and alive[0] != name:
+                tail = alive[0][len(name):]
+                if tail:
+                    input_ids.extend(self._encode(tail))
+                name = alive[0]
+                break
             excluded: list[int] = []
             for i, piece in enumerate(self._tok_text):
                 if piece == "" or not any(
-                        t.startswith(name + piece) for t in alive):
+                    t.startswith(name + piece) for t in alive
+                ):
                     excluded.append(i)
             chosen = self._pick(logits, excluded)
             piece = self._tok_text[chosen]
             input_ids.append(chosen)
             name += piece
             if name in targets and not any(
-                    t for t in targets
-                    if t != name and t.startswith(name)):
+                t for t in targets if t != name and t.startswith(name)
+            ):
                 break
             logits = self.slm.get_logits_from_input_ids(input_ids)
         if name not in targets:
@@ -199,15 +205,23 @@ class ConstrainedEngine:
         return name, input_ids
 
     def _gen_number(self, input_ids: list[int]) -> tuple[str, list[int]]:
-        """Generate a number value constrained to the JSON number grammar."""
+        """Generate a number value constrained to the JSON number grammar.
+
+        The generation only stops when the model *itself* no longer wants to
+        extend the numeral (e.g. its top raw token would break the JSON number
+        grammar, like a comma or a closing brace). Small models spell numbers
+        token by token (``2`` then ``65`` for ``265``), so stopping at the first
+        valid number would truncate multi-digit values.
+        """
         acc = ""
-        for _ in range(40):
+        for _ in range(48):
             logits = self.slm.get_logits_from_input_ids(input_ids)
-            top = int(np.argmax(logits))
-            top_text = self._tok_text[top].strip()
             if acc and self._num_status(acc) == "complete":
+                top = int(np.argmax(logits))
+                top_text = self._tok_text[top].strip()
                 if not top_text or self._num_status(
-                        acc + top_text) == "invalid":
+                    acc + top_text
+                ) == "invalid":
                     return acc, input_ids
             excluded: list[int] = []
             for i, piece in enumerate(self._tok_text):
@@ -219,8 +233,6 @@ class ConstrainedEngine:
             input_ids.append(chosen)
             if chosen_text:
                 acc += chosen_text
-            if acc and self._num_status(acc) == "complete":
-                return acc, input_ids
         if acc and self._num_status(acc) != "invalid":
             return acc, input_ids
         return "0", input_ids
@@ -235,7 +247,8 @@ class ConstrainedEngine:
             for i, piece in enumerate(self._tok_text):
                 stripped = piece.strip()
                 if stripped and not any(
-                        t.startswith(acc + stripped) for t in targets):
+                    t.startswith(acc + stripped) for t in targets
+                ):
                     excluded.append(i)
             chosen = self._pick(logits, excluded)
             chosen_text = self._tok_text[chosen].strip()
@@ -251,39 +264,68 @@ class ConstrainedEngine:
             input_ids.extend(self._encode(tail))
         return fallback, input_ids
 
-    def _gen_string(self, input_ids: list[int]) -> tuple[str, list[int]]:
-        """Generate a string value constrained to valid JSON string content."""
+    def _gen_string(
+        self, input_ids: list[int], struct: str
+    ) -> tuple[str, list[int], str]:
+        """Generate a string value constrained to valid JSON string content.
+
+        The caller has already appended the opening quote. ``struct`` is the
+        JSON that must follow the value (a comma plus the next key, or a
+        closing ``}}``); the generation is allowed to close the string and
+        consume any prefix of ``struct`` in a single token, returning the
+        consumed part as ``tail``.
+        """
         acc = ""
+        tail = ""
         escaped = False
         for _ in range(48):
             logits = self.slm.get_logits_from_input_ids(input_ids)
             if escaped:
                 allowed = [
-                    i for i in self._escape_start_ids
-                    if self._string_token(self._tok_text[i], True)[0]
+                    i
+                    for i in self._escape_start_ids
+                    if self._string_token(self._tok_text[i], True, struct)[0]
                 ]
                 excluded = set(range(self._vocab_size)) - set(allowed)
             else:
                 excluded = set(self._ctrl_ids)
-                excluded |= self._quote_mid_ids
-                for i in self._quote_end_ids | self._backslash_ids:
-                    if not self._string_token(self._tok_text[i], False)[0]:
+                for i in self._quote_ids:
+                    if not self._string_token(
+                        self._tok_text[i], False, struct
+                    )[0]:
                         excluded.add(i)
             chosen = self._pick(logits, list(excluded))
             piece = self._tok_text[chosen]
-            ok, new_escaped, terminated = self._string_token(piece, escaped)
+            ok, new_escaped, terminated, quote_idx = self._string_token(
+                piece, escaped, struct)
             input_ids.append(chosen)
             if not ok:
                 break
             escaped = new_escaped
             if terminated:
-                acc += piece[:-1]
-                return acc, input_ids
+                acc += piece[:quote_idx]
+                tail = piece[quote_idx + 1:]
+                return self._collapse_backslashes(acc), input_ids, tail
             acc += piece
         if escaped:
             input_ids.extend(self._encode("\\\\"))
         input_ids.extend(self._encode('"'))
-        return acc, input_ids
+        return self._collapse_backslashes(acc), input_ids, ""
+
+    @staticmethod
+    def _collapse_backslashes(value: str) -> str:
+        """Collapse backslash pairs the model wrote in JSON-literal form.
+
+        Small models often write a raw backslash inside a JSON string as an
+        escaped pair (two backslash characters) because training data shows
+        regex patterns in escaped form. For instance the intended pattern
+        ``\\d+`` is emitted as ``\\\\d+`` (four backslash characters in the
+        generated JSON text). The engine serializes the final document
+        itself, so collapsing each pair restores the intended value.
+        """
+        if "\\\\" not in value:
+            return value
+        return value.replace("\\\\", "\\")
 
     def _coerce_value(self, value: Any, ptype: str) -> Any:
         """Cast a raw generated value to the schema-declared Python type."""
@@ -311,32 +353,38 @@ class ConstrainedEngine:
         for fn in self.functions:
             props = self._function_props(fn)
             param_names = list(props.keys())
-            lines.append(f"{fn.name}({', '.join(param_names)}) "
-                         f"- {fn.description}")
+            lines.append(
+                f"{fn.name}({', '.join(param_names)}) - {fn.description}"
+            )
 
         examples: list[tuple[str, str, dict[str, Any], list[str]]] = [
-            ("fn_add_numbers", "What is the sum of 2 and 3?",
-             {"a": 2, "b": 3}, ["a", "b"]),
-            ("fn_greet", "Greet Alice", {"name": "Alice"}, ["name"]),
-            ("fn_reverse_string", "Reverse the string 'hi'",
-             {"s": "hi"}, ["s"]),
-            ("fn_get_square_root", "What is the square root of 16?",
-             {"a": 16}, ["a"]),
-            ("fn_substitute_string_with_regex",
-             "Replace all numbers in 'a1' with X",
-             {"source_string": "a1", "regex": "\\d", "replacement": "X"},
-             ["source_string", "regex", "replacement"]),
+            (
+                "fn_add_numbers",
+                "What is the sum of 2 and 3?",
+                {"a": 2, "b": 3},
+                ["a", "b"],
+            ),
+            (
+                "fn_substitute_string_with_regex",
+                "Replace all numbers in 'a1' with X",
+                {"source_string": "a1", "regex": "\\d", "replacement": "X"},
+                ["source_string", "regex", "replacement"],
+            ),
         ]
         for fn_name, user, params, keys in examples:
             target = next(
-                (f for f in self.functions if f.name == fn_name), None)
+                (f for f in self.functions if f.name == fn_name), None
+            )
             if target is None:
                 continue
             props = self._function_props(target)
             if list(props.keys()) != keys:
                 continue
-            payload = json.dumps({"name": fn_name, "parameters": params},
-                                 separators=(",", ":"), ensure_ascii=False)
+            payload = json.dumps(
+                {"name": fn_name, "parameters": params},
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
             lines.append(f"User: {user}")
             lines.append(f"Assistant: {payload}")
 
@@ -363,8 +411,7 @@ class ConstrainedEngine:
     def _function_props(self, fn: FunctionDef) -> dict[str, dict[str, str]]:
         """Return the parameter property map of a function definition."""
         if "properties" in fn.parameters:
-            return cast(dict[str, dict[str, str]],
-                        fn.parameters["properties"])
+            return cast(dict[str, dict[str, str]], fn.parameters["properties"])
         return fn.parameters
 
     def run(self) -> None:
@@ -387,17 +434,26 @@ class ConstrainedEngine:
             input_ids.extend(self._encode('","parameters":{'))
             params: dict[str, Any] = {}
             for idx, key in enumerate(keys):
-                input_ids.extend(self._encode(json.dumps(key) + ":"))
                 ptype = props[key].get("type", "string").lower()
-                if ptype in ("number", "float", "integer"):
-                    raw, input_ids = self._gen_number(input_ids)
-                elif ptype in ("boolean", "bool"):
-                    raw, input_ids = self._gen_bool(input_ids)
+                is_last = idx == len(keys) - 1
+                if ptype in ("number", "float", "integer", "boolean", "bool"):
+                    input_ids.extend(self._encode(json.dumps(key) + ":"))
+                    if ptype in ("number", "float", "integer"):
+                        raw, input_ids = self._gen_number(input_ids)
+                    else:
+                        raw, input_ids = self._gen_bool(input_ids)
+                    input_ids.extend(self._encode("}}" if is_last else ","))
                 else:
-                    raw, input_ids = self._gen_string(input_ids)
+                    struct = (
+                        "}}" if is_last
+                        else "," + json.dumps(keys[idx + 1]) + ":"
+                    )
+                    input_ids.extend(self._encode(json.dumps(key) + ':"'))
+                    raw, input_ids, tail = self._gen_string(input_ids, struct)
+                    remaining = struct[len(tail):]
+                    if remaining:
+                        input_ids.extend(self._encode(remaining))
                 params[key] = self._coerce_value(raw, ptype)
-                if idx != len(keys) - 1:
-                    input_ids.extend(self._encode(","))
             input_ids.extend(self._encode("}}"))
 
             json_text = self.slm.decode(input_ids[gen_start:])
@@ -405,14 +461,17 @@ class ConstrainedEngine:
             if parsed:
                 params = {
                     k: self._coerce_value(
-                        v, props.get(k, {}).get("type", "string"))
+                        v, props.get(k, {}).get("type", "string")
+                    )
                     for k, v in parsed.get("parameters", {}).items()
                 }
 
-            self.results.append({
-                "prompt": prompt_def.prompt,
-                "name": name,
-                "parameters": params,
-            })
+            self.results.append(
+                {
+                    "prompt": prompt_def.prompt,
+                    "name": name,
+                    "parameters": params,
+                }
+            )
 
         self.export_json()
