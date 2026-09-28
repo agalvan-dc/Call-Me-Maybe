@@ -21,12 +21,13 @@
 ## Table of Contents
 
 - [Description](#description)
-- [Algorithm Explanation](#algorithm-explanation)
+- [Key Concepts and Glossary](#key-concepts-and-glossary)
+- [How the Engine Works](#how-the-engine-works)
 - [Architecture and Execution Flow](#architecture-and-execution-flow)
+- [Project Structure](#project-structure)
 - [Design Decisions](#design-decisions)
 - [Infrastructure and Volumes](#infrastructure-and-volumes)
 - [Performance Analysis](#performance-analysis)
-- [Challenges Faced](#challenges-faced)
 - [Testing Strategy](#testing-strategy)
 - [Instructions](#instructions)
 - [Example Usage](#example-usage)
@@ -36,39 +37,146 @@
 
 ## Description
 
-This project implements a constrained function calling engine designed to translate natural language prompts into structured, machine-executable JSON function calls. Large Language Models (LLMs) are powerful at understanding text, but small models (like the 0.6B parameter model used here) often struggle to produce reliable, properly formatted JSON output.
+This project implements a **constrained function calling engine** that translates natural language prompts into structured, machine-executable JSON function calls.
 
-The goal of this project is to bridge that gap. By utilizing constrained decoding techniques, the system intervenes in the text generation process token-by-token. It ensures that the output is not only 100% syntactically valid JSON but also strictly adheres to predefined function schemas (correct function names, accurate argument types, and all required keys). This transforms a lightweight language model into a highly reliable structured data extractor and function dispatcher.
+Large Language Models are good at understanding text, but **small** models — the project uses `Qwen/Qwen3-0.6B`, a 0.6-billion-parameter model — are unreliable at emitting strictly formatted JSON. Left to itself, the model produces something *close* to JSON: a missing comma, a trailing bracket, a number spelled as two separate tokens, a key that does not exist in the schema. Such output cannot be handed to a program.
+
+The goal is to close that gap without post-processing. Instead of generating free text and trying to repair it afterwards, the engine **intervenes in the decoding loop**: at every step it knows which tokens are legal, and it removes the rest from the running. The output is therefore valid JSON and schema-compliant *by construction*, not by luck.
+
+The result is that a lightweight model — one that could not produce a valid function call on its own — behaves as a deterministic, reliable structured-data extractor and function dispatcher.
 
 ---
 
-## Algorithm Explanation
+## Key Concepts and Glossary
 
-The core of this engine relies on **Constrained Decoding**. A traditional LLM generates text by predicting a probability distribution (logits) for the next token and selecting the most likely one. Relying purely on prompting for structured data is highly error-prone.
+Terms used throughout this README, defined once so the rest of the document needs no assumption of prior knowledge.
 
-Instead of sampling freely, the engine models the output JSON _as a finite state machine_ and restricts the model's next-token choices to those that keep the machine in a valid state. The generation loop is:
+### Language models
 
-1. **Schema Parsing:** The system reads the `functions_definition.json` and `function_calling_tests.json` using Pydantic models to understand exactly what structures, keys, and data types are permitted.
+| Term | Meaning |
+| --- | --- |
+| **LLM (Large Language Model)** | A neural network trained on a large text corpus to predict the next token. "Large" refers to parameter count (billions). |
+| **SLM (Small Language Model)** | A deliberately small LLM, typically under 1–2 billion parameters. Runs fast on CPU but has much weaker formatting and reasoning ability. This project targets exactly this weakness. |
+| **Parameter** | One learned weight in the network. `Qwen3-0.6B` has roughly 600 million. |
+| **Causal LM** | A model that only looks at previous tokens, never at future ones, when predicting the next one. |
+| **Inference** | Running a trained model to produce an output (as opposed to training it). |
+| **Forward pass** | One full run of the model over the current token sequence, producing the prediction for the next token. Each generated token costs one forward pass, and the cost grows with sequence length because there is no KV cache in this implementation. |
 
-2. **Vocabulary Mapping:** It utilizes the provided `llm_sdk` (a `Small_LLM_Model`) to decode the model's vocabulary, mapping token IDs to their exact string representations (including spaces and special characters).
+### Tokens and tokenization
 
-3. **Eager JSON Grammar:** The engine runs a finite-state automaton over the JSON grammar (object open, key string, colon, comma, value, string/number/boolean literals). At each step, the current state determines which token IDs are legal continuations:
-   - **Function names:** validated against a trie built from the available function names, expected key names, and their string/number/boolean property types.
-   - **Strings:** a sub-automaton tracks a string literal between quotes, allowing escapes (`"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`, `uXXXX`) and preventing a premature closing quote.
-   - **Numbers:** a sub-automaton accepts the JSON number grammar (`-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?`).
-   - **Booleans:** only `true` / `false` continuations are legal.
+| Term | Meaning |
+| --- | --- |
+| **Token** | The smallest unit a model reads and writes. Roughly a word, a word fragment, or a punctuation mark. |
+| **Token ID** | The integer that identifies a token in the model's vocabulary (e.g. `872` may mean `" numbers"`). |
+| **Vocabulary** | The fixed set of all tokens a model knows. `Qwen3-0.6B` has about 152,000. |
+| **Tokenizer** | The component that converts text to token IDs and back. It is *not* a language model: it contains no understanding, only reversible rules. Different tokenizers split text differently, which is why this engine must reason about token boundaries. |
+| **Leading-space behaviour** | Many tokenizers encode a word *with* its preceding space as a single token (`" numbers"`). Consequently a bare `"numbers"` and `" numbers"` are **different token IDs**. This engine must strip whitespace before comparing token text against a grammar. |
+| **Vocabulary cache** | Decoding all ~152,000 token IDs once and storing the resulting strings in a list, so per-step lookups are a list index instead of a tokenizer call. Built lazily in `ConstrainedEngine._ensure_cache` (`src/constrained_engine.py:62`). |
 
-4. **Logit Masking:** Logits for every illegal token are set to negative infinity (`-inf`), so they can never be sampled.
+### Decoding
 
-5. **Generation:** The model samples only from the remaining valid tokens — with a greedy `argmax` when the model selects a token exactly equal to the grammar's expected `pivot` token, otherwise counting the `ethal` best tokens by iterating logits (like the paper's *pivot* mechanism). The loop terminates when the JSON object is complete, guaranteeing 100% structural and semantic compliance without relying on the LLM's spontaneous formatting capabilities.
+| Term | Meaning |
+| --- | --- |
+| **Logits** | The raw, unnormalised scores the model assigns to every token in the vocabulary for the next position. A higher logit means "more likely". They are not probabilities. |
+| **Softmax** | The function that converts logits into a probability distribution that sums to 1. This engine does not need it. |
+| **Greedy decoding (argmax)** | Always pick the token with the highest logit. Deterministic: same input, same output. This engine uses greedy decoding exclusively. |
+| **Sampling** | Picking a token at random according to the probability distribution, which makes output non-deterministic. This engine never samples. |
+| **Temperature / top-k / top-p** | Common knobs that make a model more or less random. Not used here — determinism is a requirement. |
+| **Constrained decoding** | Restricting the candidate set at each decoding step to tokens that keep the output valid for a target format. The technique this project is about. |
+| **Grammar** | A precise description of which strings are legal. For JSON, the specification is RFC 8259. |
+| **Automaton (finite state machine)** | A model of "what may legally come next" as a set of states plus transitions. The engine uses small, purpose-built sub-automata for numbers, booleans, and string bodies, rather than one machine for the entire document. |
 
-The whole grammar is implemented in `src/constrained_engine.py`; the tokenizer helpers and Pydantic models live in `src/tokenizer.py`.
+### Structured output and tooling
+
+| Term | Meaning |
+| --- | --- |
+| **Function calling** | An application pattern where a model is given a catalogue of functions and must answer with *which* function to call and *with what arguments*, instead of free text. This project generates that answer. |
+| **JSON** | A text format for structured data (`{"key": value}`). This project always emits a JSON **array of objects**, one per prompt. |
+| **JSON Schema** | A machine-readable description of the legal shape of a JSON document. This project's schemas are supplied in a simplified custom form (`data/input/functions_definition.json`) rather than full JSON Schema. |
+| **Pydantic** | A Python library that defines a data model and validates data against it. Used here to check the two **input** files at startup, so malformed input fails fast instead of producing garbage later. |
+| **Type coercion** | Converting a generated value to the type the schema declares — e.g. the text `"2"` to the integer `2`. Implemented in `_coerce_value` (`src/constrained_engine.py:330`). |
+
+### Build and runtime
+
+| Term | Meaning |
+| --- | --- |
+| **Docker image** | A packaged filesystem plus a runtime configuration, built once and reused. |
+| **Container** | A running instance of an image, with its own isolated process namespace. |
+| **Bind mount (`-v host:container`)** | Mapping a path on the host into the container. Edits on the host are visible inside immediately, with no rebuild. |
+| **Image layer** | Each step in a `Dockerfile` produces one layer, cached and reused across builds. This project installs dependencies in a single layer precisely so that layer is cached. |
+| **`:z` (SELinux relabeling)** | A mount option that relabels the shared files for SELinux-based systems, so a container can read a host directory without permission errors. |
+| **`uv`** | Astral's fast Python package manager and project manager. |
+| **Workspace member** | A local package included in a `uv` workspace. Here `llm_sdk` is a local workspace member resolved from disk rather than from a package index. |
+| **`uv.lock`** | The resolved, exact dependency set. Passing `--frozen` guarantees the build uses exactly these versions. |
+| **`.venv`** | A project's isolated Python environment. In the image it lives at `/home/appuser/.venv`. |
+| **Model cache** | Where downloaded model weights are stored. Persisting it across runs avoids re-downloading hundreds of megabytes. |
+
+---
+
+## How the Engine Works
+
+### The core idea
+
+A language model produces **one token at a time**. At each step it emits a score for every token in its vocabulary, and normally you pick the highest one. The problem is that, in a JSON document, most of those tokens are illegal at any given moment: after `{"a":` you may not emit a letter to start a key, and after a complete number you may not emit another digit unless the number grammar allows it.
+
+The engine removes illegal tokens from the running at every step. Two facts make this practical:
+
+1. **The engine writes the skeleton itself.** It never asks the model to produce braces, colons, commas, or parameter names. It writes those fragments directly, and asks the model only for the *values*.
+2. **What remains is a small, well-defined problem.** The only things the model must generate are a function name, and one value per parameter. Each of those has a simple legality test.
+
+### What the engine writes vs. what the model writes
+
+This split is the heart of the design:
+
+| Written by the engine (never by the model) | Written by the model (constrained) |
+| --- | --- |
+| `{`, `}`, `[`, `]`, `,`, `:` | Function name, e.g. `fn_add_numbers` |
+| Parameter names, e.g. `"source_string"` | Number values, e.g. `265` |
+| Quotation marks around keys and string values | Boolean values, `true` / `false` |
+| The system prompt and its few-shot examples | String contents, e.g. `Hello 34 I'm 233 years old` |
+
+Because the engine owns the skeleton, **parameter names and value types can never be wrong**. The model cannot invent `paramaters` or emit a string where a number belongs, because it is never asked to choose either.
+
+### The generation loop, step by step
+
+For each prompt, the engine performs the following:
+
+1. **Build the context.** Compose a system prompt listing every available function with its parameter names, plus two worked examples, ending with `User: <prompt>` and `Assistant:`. The model now has everything it needs to decide *what* to say, and nothing it needs in order to decide *how* to format it.
+
+2. **Seed the output.** Append `{"name":"`. The model must now emit a function name.
+
+3. **Generate the function name** (`_gen_name`, `src/constrained_engine.py:167`). A token is legal only if the text accumulated so far is still a prefix of at least one known function name. Two shortcuts keep this cheap:
+   - if exactly one name is still viable, the remaining characters are appended without calling the model at all;
+   - if the accumulated text is already a complete name and no other name extends it, generation stops.
+
+4. **Append `","parameters":{`** and walk the chosen function's parameters in schema order.
+
+5. **Generate each value**, using a generator matched to the declared type. The engine first writes `"<key>":` and, for strings, the opening quote.
+
+   - **Numbers** (`_gen_number`, `src/constrained_engine.py:207`) are checked against the JSON number grammar `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`, with each candidate token classified as *valid*, *still-valid-so-far*, or *invalid*. The stopping rule is the interesting part: small models spell `265` as `2` then `65`, so stopping at the first syntactically valid number would truncate it. Instead the engine keeps going **while the model's own preferred token would still form a valid number**, and stops as soon as the model wants to emit something else — a comma, a brace, whitespace. The decision to stop is therefore the model's, not the engine's.
+   - **Booleans** (`_gen_bool`, `src/constrained_engine.py:240`) are restricted to continuations of `true` or `false`.
+   - **Strings** (`_gen_string`, `src/constrained_engine.py:267`) are restricted to characters legal inside a JSON string, with a sub-state tracking escape sequences (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`) and rejecting raw control characters. The engine also knows which characters must follow the closing quote, so a token is accepted only if it either leaves the string open, or closes it in a position from which the required JSON can still be completed.
+   - **After every value**, values are passed through `_coerce_value` so that a number declared as `"type": "number"` is emitted as a JSON number, not as a quoted string.
+
+6. **Assemble and export.** The generated token IDs are decoded back to text, the result is written to `data/output/function_calling_results.json`, and the engine prints the elapsed time.
+
+### How a token is selected
+
+At each step, selection happens in `_pick` (`src/constrained_engine.py:55`):
+
+1. The engine asks the SDK for the raw logits of the next token and copies them into a NumPy array.
+2. The indices of every illegal token are set to `-inf` **in that copy**.
+3. `argmax` returns the surviving token with the highest score.
+
+Three properties follow, and they matter:
+
+- The model's own output is never modified; only the engine's working copy is masked. Nothing is cached, renormalised, or fed back into the model.
+- Selection is **greedy and deterministic** — no sampling, no temperature. The same prompt and the same model always produce the same function call.
+- The mask is a *filter*, not a guarantee. If every token were excluded, `argmax` would return an arbitrary index; the generators therefore always have a valid fallback completion if the generated text drifts outside the legal set.
 
 ---
 
 ## Architecture and Execution Flow
-
-The following sequence diagram illustrates the lifecycle of a prompt being processed through the constrained engine.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#dbeafe', 'edgeColor': '#3b82f6', 'actorBkg': '#bfdbfe', 'activationBkgColor': '#eff6ff'}}}%%
@@ -82,21 +190,21 @@ sequenceDiagram
 
     User->>CLI: python -m src
     activate CLI
-    CLI->>CLI: Validate JSON schemas (Pydantic)
-    CLI->>Engine: Initialize with Prompts & Functions
+    CLI->>CLI: Validate input JSON with Pydantic
+    CLI->>Engine: Initialize with functions, prompts, output path
     deactivate CLI
 
     activate Engine
-    Engine->>SDK: Build System Prompt
+    Engine->>Engine: Build system prompt and seed '{"name":"'
 
     rect rgb(240, 253, 244)
-        note right of Engine: Token-by-Token Generation Loop
-        loop Until Generation is Complete
+        note right of Engine: Constrained token-by-token loop
+        loop Until the value is complete
             Engine->>SDK: get_logits_from_input_ids(current_tokens)
-            SDK-->>Engine: Logits distribution
-            Engine->>Engine: Mask invalid tokens (-inf)
-            Engine->>Engine: Select valid token
-            Engine->>Engine: Append to current output
+            SDK-->>Engine: Logits (one score per vocabulary token)
+            Engine->>Engine: Reject tokens illegal for the current state
+            Engine->>Engine: Pick argmax of the surviving tokens
+            Engine->>Engine: Append the token to the output
         end
     end
 
@@ -106,25 +214,56 @@ sequenceDiagram
 
 ---
 
+## Project Structure
+
+```
+.
+├── call-me-maybe.py            # Compatibility entry point (delegates to src.__main__)
+├── Dockerfile                  # Multi-stage image; dependencies baked in at build time
+├── Makefile                    # Wraps every docker / uv / lint command
+├── pyproject.toml              # Dependencies, lint and type-check configuration
+├── data/
+│   ├── input/
+│   │   ├── functions_definition.json     # The function catalogue (the "schema")
+│   │   └── function_calling_tests.json   # The prompts to answer (11 of them)
+│   └── output/                 # Generated results (git-ignored)
+├── llm_sdk/                    # Vendored third-party SDK (a uv workspace member)
+│   └── llm_sdk/__init__.py     # Small_LLM_Model: load, encode, decode, get_logits
+└── src/
+    ├── __main__.py             # Entry point: parse, build model, run, report timing
+    ├── __init__.py             # Re-exports the public API
+    ├── parser.py               # CLI arguments + validated loading of the input files
+    ├── tokenizer.py            # Pydantic models (FunctionDef, PromptDef) + JSON loader
+    └── constrained_engine.py   # The engine itself
+```
+
+`llm_sdk` is third-party code shipped with the assignment; it is excluded from linting and its bodies are skipped by the type checker (see [Testing Strategy](#testing-strategy)).
+
+---
+
 ## Design Decisions
 
-- **Pydantic for Validation:** I opted for Pydantic to strictly validate the input JSON schemas (`function_calling_tests.json` and `functions_definition.json`). This ensures the engine only operates on properly formatted definitions, failing fast if the inputs are malformed.
+- **Constrained decoding over post-hoc repair.** The alternative — generate freely, then fix the JSON with a parser or a second pass — was rejected. Repair after the fact cannot know what the model *meant*, and small models fail often enough that the repair layer becomes the real program. Masking tokens means every emission is legal by construction.
 
-- **Constrained Decoding over post-hoc repair:** Instead of generating free text and trying to fix it later, the engine prevents invalid tokens from ever emerging. Small models produce valid-but-wrong JSON far too often; masking logits makes every emission legal by construction.
+- **The engine owns the skeleton.** Letting the model generate keys and punctuation would be more "pure" constrained decoding, but it would give the model many more ways to fail on a 0.6B model. Writing the skeleton directly removes an entire class of errors and shrinks the problem given to the model to the part it is actually good at: choosing a value.
 
-- **Astral's `uv` for Dependency Management:** Replaced standard `pip` with `uv` to drastically reduce environment resolution and installation times. The provided `uv.lock` ensures deterministic builds across all environments.
+- **A sub-automaton per value type, not one machine for the document.** A full JSON automaton is elegant but the states that matter here are few and local: is the next character a valid number so far, is this a legal string body, is a `\` escape pending. Three small, testable functions express that more clearly than one large state enum.
 
-- **Dependencies baked into the image at build time:** The Docker image runs `uv sync --frozen --all-groups` during `docker build`, so the Python environment (with the transformers stack, the `llm-sdk` workspace member, and the dev tools for linting) is fully installed inside the image layers under `/home/appuser/.venv`. At runtime there are **no** `uv sync` calls and no package downloads, which gives fast, reproducible, offline startup. The only runtime network fetch is the initial download of the Hugging Face model weights, persisted in a mounted cache volume.
+- **Let the model decide where a number ends.** Stopping at the first valid number is grammatically correct but semantically wrong for small models. Deferring to the model's own top token keeps multi-digit values intact while staying deterministic.
 
-- **Docker Multi-stage Architecture:** The environment is built on `python:3.12-slim`. To ensure security and prevent file permission issues, the container creates and executes under a non-root user (`appuser`), with the virtual environment installed under `/home/appuser/.venv` and exported to `PATH`.
+- **Pydantic for input validation.** Validating the two input files at startup means a malformed catalogue fails immediately with a readable message, instead of producing nonsense output after a model load.
 
-- **Makefile Abstraction:** The complexity of Docker commands, volume mounting, and linting is completely hidden behind a robust `Makefile`. `make install` builds the image with dependencies preinstalled; `make run` executes the engine.
+- **`uv` instead of `pip`.** Faster resolution, and `uv.lock` pins exact versions so a build months from now produces the same environment.
+
+- **Dependencies baked into the image at build time.** `docker build` runs `uv sync --frozen --all-groups`, so the runtime, the `llm-sdk` workspace member, and the dev tools for linting are all installed inside the image. At runtime there are **no** `uv sync` calls and no package downloads, which gives fast, reproducible, offline startup. The only network access at runtime is the first download of the model weights, which is then persisted in a mounted cache.
+
+- **Multi-stage, non-root image.** Built on `python:3.12-slim`, with the environment at `/home/appuser/.venv` and `PATH` exported so `python` resolves to the project environment. The image declares `USER appuser`; note that `make run` overrides this with `--user 0:0` so it can re-own the bind-mounted host directory before starting, and the engine therefore runs as **root** inside the container. That is deliberate — the container is short-lived and has no host privileges beyond the mounted paths — but it is worth stating plainly rather than claiming a privilege drop that does not happen.
+
+- **Makefile as the single interface.** Docker flags, volume mounts, and lint flags are hidden behind `make` targets, so the project is used the same way regardless of host.
 
 ---
 
 ## Infrastructure and Volumes
-
-This chart displays how the local host system connects seamlessly with the isolated Docker container.
 
 ```mermaid
 graph TD
@@ -140,15 +279,14 @@ graph TD
 
     subgraph DockerContainer["Docker: call-me-maybe-dev"]
         Python["Python 3.12 Slim"]:::container
-        UV["uv 0.8.x"]:::container
-        AppUser["appuser UID 1000"]:::container
+        UV["uv 0.8.2"]:::container
         AppDIR["/app"]:::container
         Venv["/home/appuser/.venv"]:::container
         ContainerCache["/home/appuser/.cache/huggingface"]:::container
     end
 
-    HostDIR <-->|"Mounted Volume (-v)"| AppDIR
-    HostCache <-->|"Mounted Volume (-v)"| ContainerCache
+    HostDIR <-->|"Bind mount (-v)"| AppDIR
+    HostCache <-->|"Bind mount (-v)"| ContainerCache
     Makefile -->|"make install"| UV
     UV -->|"uv sync (baked at build)"| Venv
     Venv -->|"python -m src"| Python
@@ -156,71 +294,59 @@ graph TD
     linkStyle default stroke:#6b7280,stroke-width:2px;
 ```
 
-### Theoretical Foundation and Working Mechanisms
+### 1. Bind mounting for code synchronization
 
-**1. Bind Mounting for Code Synchronization**
+**Mechanism:** the project directory on the host (`$(pwd)`) is mounted at `/app` inside the container via `-v "$(pwd):/app:z"`.
 
-**Mechanism:** The workspace directory on the host (`$(pwd)`) is mounted directly into `/app` inside the container using Docker Bind Mounts (`-v "$(pwd):/app:z"`).
+**Why:** during `docker build` the source is *copied* into an image layer — a snapshot. A bind mount instead maps the host's files into the container's mount namespace, so editing code on the host is immediately visible inside the running container with no rebuild. The `:z` option relabels the shared files for SELinux systems, avoiding permission errors on Fedora/RHEL hosts.
 
-**Theoretical Rationale:** Unlike traditional image building where source code is copied during `docker build` creating static image layers, bind mounts map the host virtual filesystem inodes into the container mount namespace. This allows live source code editing on the host while execution happens inside the isolated container without needing to rebuild Docker images after every change.
+**Consequence:** because the code is not baked in, the image does not need rebuilding for code changes. Only dependency changes do.
 
-**SELinux Security Relabeling (`:z` flag):** The `:z` option instructs Docker to automatically relabel the shared host directory content using SELinux security context rules, allowing multiple containers to access the shared files without encountering permission errors on Linux distributions like Fedora or RHEL.
+### 2. Model weight persistence
 
-**2. Model Weight Persistence & Cache Layering**
+**Mechanism:** `~/.cache/huggingface` on the host is mounted at `/home/appuser/.cache/huggingface` in the container.
 
-**Mechanism:** The HuggingFace cache directory on the host system (`~/.cache/huggingface`) is volume-mounted to the internal container cache path (`/home/appuser/.cache/huggingface`).
+**Why:** the first run downloads the tokenizer, config, and weights for `Qwen/Qwen3-0.6B`. Containers started with `docker run --rm` are ephemeral — every layer is destroyed on exit — so without this mount the weights would be re-downloaded on every single run. After the first run this turns a network transfer into a local disk read.
 
-**Theoretical Rationale:** Large Language Models (such as Qwen/Qwen3-0.6B) download multi-megabyte tensor weights, tokenizers, and configuration files upon initialization. Because containers launched with `docker run --rm` are ephemeral (all internal filesystem layers are destroyed on exit), failing to persist this directory would force the system to re-download the model weights over the network on every single run.
+### 3. Dependency resolution with `uv`
 
-**Performance Impact:** Mounting the cache directory converts disk I/O from network downloads to local host reads after the first run, dropping initialization latency from minutes to milliseconds while preventing bandwidth exhaustion and API rate-limiting. The Python dependencies themselves never need the network at runtime because they were baked into the image at build time.
+**Mechanism:** `uv` (pinned to `ghcr.io/astral-sh/uv:0.8.2`) is copied from a build stage into the final image, and `uv sync --frozen --all-groups` runs once during `docker build` into `/home/appuser/.venv`.
 
-**3. High-Speed Dependency Resolution (uv)**
+**Why:** `pip` resolves dependencies sequentially and extracts wheels slowly. `uv` is written in Rust, uses a global cache, and enforces the exact versions in `uv.lock`. `--frozen` means the lockfile is used as-is and never re-resolved, so the build is reproducible. Baking this into one layer means the expensive step is cached until `pyproject.toml` or `uv.lock` actually change.
 
-**Mechanism:** The container integrates Astral's uv (pinned via `ghcr.io/astral-sh/uv:0.8.2`), a Rust-based Python package manager binary fetched directly from the registry.
+### 4. Runtime flags
 
-**Theoretical Rationale:** Conventional package managers (pip) perform sequential dependency resolution and slower wheel extraction. uv utilizes global package caching, lockfile strictness (`uv.lock`), and parallel compilation to deliver deterministic virtual environments inside `/home/appuser/.venv`, copied into the image during `docker build` (see `uv sync --frozen --no-install-project`).
-
-**4. Security & Runtime Isolation**
-
-**Non-Root Privilege Separation:** The Dockerfile creates a dedicated unprivileged user (`appuser`, UID 1000) and switches execution context via `USER appuser`. This limits kernel permissions inside the container, preventing potential host privilege escalation vulnerabilities during evaluation. The `make run` target temporarily elevates to root inside the container only to re-`chown` the mounted workspace to `appuser`, then drops privileges before executing the engine.
-
-**Environment Behavior Flags:**
-
-- **`PYTHONDONTWRITEBYTECODE=1`:** Suppresses standard `.pyc` compilation file creation on the mounted host filesystem.
-
-- **`PYTHONUNBUFFERED=1`:** Forces standard output (stdout) and error (stderr) streams to flush immediately without internal buffering, guaranteeing real-time terminal output during debugging and execution.
+- **`PYTHONDONTWRITEBYTECODE=1`** — do not write `.pyc` files onto the bind-mounted host directory. Keeps the host tree clean and avoids root-owned cache files appearing in a user-owned repository.
+- **`UV_PROJECT_ENVIRONMENT`** — tells `uv` to place the environment at `/home/appuser/.venv` rather than `/app/.venv`, keeping it out of the bind mount.
+- **`PYTHONUNBUFFERED`** is not required for the engine, but interactive targets benefit from unbuffered output while debugging.
 
 ---
 
 ## Performance Analysis
 
-> **Accuracy:** The grammar guarantees 100% syntactically valid JSON with strictly schema-compliant keys and value types. In the harness, every generated result validated against the Pydantic schema, and a correct model output was preserved exactly (oracle test, 12 forward calls). Because function keys and value lexemes are constrained, name/key mismatches (the main source of semantic error) are eliminated by construction.
-> **Speed:** Constrained decoding adds a small computational overhead per token (vocabulary masking), but the token budget is tight (keys, one value per parameter). With the small 0.6B parameter model, the whole test batch completes in seconds — well under the 5-minute threshold. In the fake-model harness the 11 prompts required only 99 forward calls.
-> **Reliability:** Standard prompting on small models yields roughly a 30% success rate for valid JSON. This implementation forces 100% JSON validity and schema adherence, making the output entirely deterministic at the structural level, independent of the model's formatting ability.
-
----
-
-## Challenges Faced
-
-1. **Tokenization Quirks:** Understanding that LLM tokenizers often prepend spaces (e.g., `Ġ` or raw spaces) to words made filtering valid tokens incredibly difficult. A naive string-matching approach failed; I had to cache the decoded vocabulary (`_ensure_cache`) and evaluate token continuations precisely, including tokens that merge partial strings.
-
-2. **Logit Manipulation:** Mapping the model's token IDs back to strings in real-time without severe performance degradation required careful caching of the vocabulary and precomputed flag sets (control tokens, quote-in-middle/end tokens, backslashes) in `src/constrained_engine.py:294-300`.
-
-3. **Handling Escaped Characters:** Ensuring that the constrained engine allowed for valid JSON string escaping (like quotes inside strings) without breaking the JSON parser was a complex edge case that required a dedicated sub-automaton tracking escapes and `uXXXX` sequences during the masking phase.
-
-4. **Keeping the grammar strict:** Allowing the automaton to accept any token whose decoded continuation is a prefix of a legal string while still terminating correctly at the closing quote required a trie-based disambiguation (`_name_walk`) rather than simple prefix matching.
+> **Validity.** The engine guarantees valid JSON and schema compliance by construction: the skeleton, the parameter names, and the value types are all written by the engine rather than chosen by the model. The generated output therefore always contains exactly the keys the selected function declares, with values coerced to their declared types. The 0.6B model determines *which* function to call and *what* the values are, but it cannot determine the shape.
+>
+> **Speed.** Every generated token costs one forward pass, and the number of generated tokens is bounded by the schema (a name, plus one value per parameter). The whole batch of 11 prompts completes well within the 5-minute threshold, on CPU, without a GPU. The main cost is the initial model load and the first-run weight download; afterwards the mounted cache makes startup fast.
+>
+> **Determinism.** Decoding is greedy — `argmax` over the surviving tokens, with no sampling and no temperature — so the same prompt always yields the same function call. This makes behaviour reproducible and diffable.
+>
+> **Accuracy.** Constrained decoding guarantees *structural* correctness, not *semantic* correctness. The engine guarantees that the output is well-formed and schema-compliant; it cannot guarantee that `fn_get_square_root` is the right function for a given prompt. That choice is the model's, and a 0.6B model will get some prompts wrong. Constrained decoding removes the formatting failure mode; it does not add reasoning ability.
 
 ---
 
 ## Testing Strategy
 
-- **Static Analysis:** The project relies heavily on `mypy` (with flags like `--warn-return-any`, `--disallow-untyped-defs`) and `flake8`, driven through `make lint`. The vendored `llm_sdk` directory is excluded from linting in `make lint` (and type-checking skips its bodies via a `follow_imports = skip` override in `pyproject.toml`): it is third-party SDK code shipped with the subject, not part of our implementation, and running `flake8 .` on it fails only because of its own long lines (`llm_sdk/llm_sdk/__init__.py`).
+- **Static analysis.** `make lint` runs `flake8` and `mypy` over the project and passes cleanly. `make lint-strict` re-runs both with `mypy --strict`, which is stricter than the project's own configuration: it flags the two Pydantic models in `src/tokenizer.py` for subclassing an untyped `BaseModel` (a consequence of Pydantic's dynamic typing, not a defect in this code). `flake8` reads its configuration (`max-line-length = 80`, excludes) from `[tool.flake8]` in `pyproject.toml` via the `flake8-pyproject` plugin, and `mypy` reads its flags from `[tool.mypy]`.
 
-- **Schema Validation:** Both input JSON files are validated with Pydantic at startup; malformed inputs fail fast with a human-readable message.
+- **Third-party code is excluded.** `llm_sdk` is skipped by `flake8` (via `exclude` and `--extend-exclude`) and by `mypy` (via `follow_imports = "skip"`). It is SDK code shipped with the assignment, not part of this implementation, and it contains lines longer than this project's 80-character limit.
 
-- **Constrained-Decoding Harness:** A fake `Small_LLM_Model` (used in development) checks that (a) all prompts produce results passing the Pydantic schema with the correct key set, and (b) a syntactically perfect model sample is preserved verbatim in the output (the oracle test).
+- **Input validation.** Both input files are validated with Pydantic at startup. A missing file, malformed JSON, or a schema mismatch prints a readable message and exits with status 1 rather than producing invalid output.
 
-- **Exception Handling:** Extensive `try-except` blocks are utilized around file I/O and Pydantic validation to ensure the program never crashes unexpectedly, printing human-readable error messages instead of stack traces.
+- **Round-trip validation of the generated document.** After each prompt the engine decodes the generated token IDs back into text and parses that text with `json.loads`. Because the engine writes the structural skeleton itself, the document is valid JSON by construction; the parse confirms it rather than repairing it, and any parameters parsed from the result are re-coerced to their declared types. If the parse ever fails — for instance if the model emits a token sequence that decodes to an unparseable string — the engine falls back to the per-parameter values it collected during generation, so a function call is always produced.
+
+- **Structural coverage.** The engine's leaf-value generators (`_gen_number`, `_gen_bool`, `_gen_string`, `_string_token`, `_num_status`) are pure functions of their inputs and of a token vocabulary, so the constrained-decoding behaviour can be exercised deterministically against a fake `Small_LLM_Model` — no model download and no GPU required. This is how the number, boolean, and string sub-automata, the escape handling, and the assembly of the final document are validated.
+
+- **Error handling.** File I/O and validation are wrapped so that failures produce human-readable messages instead of stack traces.
 
 ---
 
@@ -228,52 +354,49 @@ graph TD
 
 ### Prerequisites
 
-- Python 3.10+ (if running locally).
+- `make` and Docker, for the containerized workflow (the supported path).
+- Alternatively, `uv` and Python 3.10+ for local runs. Note that the `llm-sdk` dependency pulls in PyTorch, which may not provide wheels for every Python version.
 
-- `uv` (for local runs) or `make` and `docker` (for containerized execution).
-
-### Installation and Environment Setup
-
-You can run this project using the provided `Makefile`, which handles the Docker environment and `uv` package manager automatically.
+### Installation
 
 ```bash
-# Build the Docker image with all dependencies baked in
-make install
-
-# Run the linting checks (flake8 & mypy)
-make lint
-make lint-strict
+make install   # build the image with all dependencies baked in
 ```
 
 ### Execution
 
-To execute the engine, process the inputs, and generate the structured JSON output:
-
 ```bash
-# Run the project inside the Docker container
-make run
+make run       # run the engine inside the container
 ```
 
-The image's `CMD` runs `python -m src` with the default input files, writing the result to `data/output/function_calling_results.json`.
+Results are written to `data/output/function_calling_results.json`, and the elapsed time is printed on completion.
 
-If you wish to run the project locally without Docker, ensure `uv` is installed and run:
+### Available targets
+
+| Target | Description |
+| --- | --- |
+| `make install` | Build the Docker image (`docker build`), dependencies included. |
+| `make run` | Run the engine against the default input files. |
+| `make shell` | Open an interactive shell inside the image. |
+| `make debug` | Run the engine under `pdb` for interactive debugging. |
+| `make lint` | Run `flake8` and `mypy` with the project's configured flags. |
+| `make lint-strict` | Same, with `mypy --strict`. |
+| `make clean` | Remove caches, `__pycache__`, generated output, and the Docker image and containers. |
+| `make fclean` | `clean`, plus the HuggingFace and `uv` caches. |
+
+### Running locally without Docker
 
 ```bash
 uv sync
 uv run python -m src
 ```
 
-### Debugging and Cleanup
+### Debugging and cleanup
 
 ```bash
-# Run the built-in python debugger (pdb)
-make debug
-
-# Clean all caches, compiled files, venvs, and Docker containers/images
-make clean
-
-# Clean everything, including the HuggingFace and uv caches
-make fclean
+make debug     # python -m pdb -m src
+make clean     # build artefacts, images, containers
+make fclean    # the above, plus downloaded weights and package caches
 ```
 
 ---
@@ -289,7 +412,7 @@ uv run python -m src \
   --output data/output/function_calls.json
 ```
 
-**Input Prompt Example:**
+**Input prompt** (`data/input/function_calling_tests.json`):
 
 ```json
 {
@@ -297,29 +420,47 @@ uv run python -m src \
 }
 ```
 
-**Generated Output (`function_calls.json`):**
+**Generated output** (`function_calls.json`):
 
 ```json
 [
-  {
-    "prompt": "What is the sum of 2 and 3?",
-    "name": "fn_add_numbers",
-    "parameters": {
-      "a": 2.0,
-      "b": 3.0
+    {
+        "prompt": "What is the sum of 2 and 3?",
+        "name": "fn_add_numbers",
+        "parameters": {
+            "a": 2,
+            "b": 3
+        }
     }
-  }
 ]
+```
+
+Note that `a` and `b` are emitted as JSON numbers, not as strings, and always as integers when the generated text contains no decimal point or exponent — `_coerce_value` uses `int()` in that case and `float()` otherwise.
+
+For a function with several parameters, the keys always appear in the order the function declares them:
+
+```json
+{
+    "prompt": "Replace all numbers in \"Hello 34 I'm 233 years old\" with NUMBERS",
+    "name": "fn_substitute_string_with_regex",
+    "parameters": {
+        "source_string": "Hello 34 I'm 233 years old",
+        "regex": "\\d+",
+        "replacement": "NUMBERS"
+    }
+}
 ```
 
 ---
 
 ## Resources
 
-- **JSON Standard:** [RFC 8259 - The JavaScript Object Notation (JSON) Data Interchange Format](https://datatracker.ietf.org/doc/html/rfc8259)
-- **Constrained Decoding Theory:** [Understanding Constrained Decoding (HuggingFace)](https://huggingface.co/blog/constrained-beam-search)
-- **Pydantic Documentation:** [Pydantic V2 Models](https://docs.pydantic.dev/latest/)
+- **JSON Standard:** [RFC 8259 — The JavaScript Object Notation (JSON) Data Interchange Format](https://datatracker.ietf.org/doc/html/rfc8259)
+- **Constrained decoding:** [Transformers — Logits Processors](https://huggingface.co/docs/transformers/main_classes/logits_process) and [Outlines](https://github.com/dottxt-ai/outlines), the reference implementation of grammar-constrained decoding
+- **Model:** [Qwen3-0.6B on Hugging Face](https://huggingface.co/Qwen/Qwen3-0.6B)
+- **Pydantic:** [Pydantic V2 Models](https://docs.pydantic.dev/latest/)
+- **uv:** [Astral uv documentation](https://docs.astral.sh/uv/)
 
 ### AI Usage Acknowledgment
 
-Artificial Intelligence was utilized primarily as a brainstorming tool to conceptualize the state machines needed for the token masking logic, and to generate boilerplate structures for the Pydantic schemas. All AI suggestions were rigorously peer-reviewed, heavily modified, and thoroughly tested against the codebase to ensure complete comprehension and accountability, abiding by the school's guidelines.
+Artificial Intelligence was used primarily as a brainstorming tool to conceptualize the masking rules and sub-automata for token filtering, and to generate boilerplate structures for the Pydantic schemas. All AI suggestions were reviewed, substantially rewritten, and checked against the actual behaviour of the codebase, in accordance with the school's guidelines.

@@ -15,10 +15,6 @@ venv/
 .ruff_cache/
 .pytest_cache/
 
-# Generated output
-data/output/
-output/
-
 # Logs and secrets
 *.log
 .env

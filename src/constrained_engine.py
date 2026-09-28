@@ -420,9 +420,9 @@ class ConstrainedEngine:
         for prompt_def in self.prompts:
             context = self._build_system_prompt(prompt_def.prompt)
             input_ids = self._encode(context)
-            input_ids.extend(self._encode('{"name":"'))
 
             gen_start = len(input_ids)
+            input_ids.extend(self._encode('{"name":"'))
             name, input_ids = self._gen_name(input_ids)
 
             fn = fn_by_name.get(name)
@@ -433,28 +433,33 @@ class ConstrainedEngine:
 
             input_ids.extend(self._encode('","parameters":{'))
             params: dict[str, Any] = {}
+            pending = json.dumps(keys[0]) + ":" if keys else "}}"
             for idx, key in enumerate(keys):
                 ptype = props[key].get("type", "string").lower()
                 is_last = idx == len(keys) - 1
-                if ptype in ("number", "float", "integer", "boolean", "bool"):
-                    input_ids.extend(self._encode(json.dumps(key) + ":"))
-                    if ptype in ("number", "float", "integer"):
-                        raw, input_ids = self._gen_number(input_ids)
-                    else:
-                        raw, input_ids = self._gen_bool(input_ids)
-                    input_ids.extend(self._encode("}}" if is_last else ","))
+                is_number = ptype in ("number", "float", "integer")
+                is_bool = ptype in ("boolean", "bool")
+                is_text = not (is_number or is_bool)
+                struct = (
+                    "}}" if is_last
+                    else "," + json.dumps(keys[idx + 1]) + ":"
+                )
+                input_ids.extend(
+                    self._encode(pending + ('"' if is_text else ""))
+                )
+                if is_number:
+                    raw, input_ids = self._gen_number(input_ids)
+                    pending = struct
+                elif is_bool:
+                    raw, input_ids = self._gen_bool(input_ids)
+                    pending = struct
                 else:
-                    struct = (
-                        "}}" if is_last
-                        else "," + json.dumps(keys[idx + 1]) + ":"
-                    )
-                    input_ids.extend(self._encode(json.dumps(key) + ':"'))
-                    raw, input_ids, tail = self._gen_string(input_ids, struct)
-                    remaining = struct[len(tail):]
-                    if remaining:
-                        input_ids.extend(self._encode(remaining))
+                    raw, input_ids, tail = self._gen_string(
+                        input_ids, struct)
+                    pending = struct[len(tail):]
                 params[key] = self._coerce_value(raw, ptype)
-            input_ids.extend(self._encode("}}"))
+            if pending:
+                input_ids.extend(self._encode(pending))
 
             json_text = self.slm.decode(input_ids[gen_start:])
             parsed = self._parse_slice(json_text)

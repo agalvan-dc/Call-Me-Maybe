@@ -62,8 +62,9 @@ clean:
 	@echo -e "\e[1;32mDocker and residues cleaned\e[0m"
 
 fclean: clean
-	@echo "Removing downloaded model weights and uv package cache..."
+	@echo "Removing the output folder, model weights and uv package cache..."
+	@rm -rf data/output output
 	@rm -rf $(HF_CACHE) $(UV_CACHE)
-	@echo -e "\e[1;32mAll caches (HuggingFace & uv) completely removed\e[0m"
+	@echo -e "\e[1;32mOutput folder and all caches (HuggingFace & uv) completely removed\e[0m"
 
 .PHONY: install run shell debug lint lint-strict clean fclean
